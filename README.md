@@ -26,8 +26,7 @@ QDTool is a Windows WPF application and requires the .NET 10 Desktop Runtime to 
 
 ### Known bugs
 **0.1.0 alpha**
-- color boxes in viewer have bad position on some display resolutions
-- 
+- No known display issues in the current source version.
 
 ##### QDTool<br/>Copyright (C) 2024 Martin Lukasek <martin@8bity.cz>, www.8bity.cz  
 ###### This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.

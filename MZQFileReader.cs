@@ -45,9 +45,9 @@ namespace QDTool
         {
             MZQHeader header = new MZQHeader();
 
-            header.StartSign = reader.ReadBytes(4);
+            header.StartSign = ReadBytesExact(reader, 4, "MZQ start signature");
             header.FileBlocksCount = reader.ReadByte();
-            header.Crc = reader.ReadBytes(3);
+            header.Crc = ReadBytesExact(reader, 3, "MZQ header CRC marker");
 
             return header;
         }
@@ -57,23 +57,23 @@ namespace QDTool
 
             MZQFileHeader header = new MZQFileHeader();
 
-            header.StartSign = reader.ReadBytes(4); // Předpokládáme, že StartSign má vždy 4 bajty
+            header.StartSign = ReadBytesExact(reader, 4, "MZQ file header start signature");
             header.MzfHeaderSign = reader.ReadByte();
             header.DataSize = reader.ReadUInt16();
             header.MzfFtype = reader.ReadByte();
-            header.MzfFname = reader.ReadBytes(16); // Předpokládáme, že MzfFname má vždy 16 bajtů
+            header.MzfFname = ReadBytesExact(reader, 16, "MZF file name");
             header.MzfFnameEnd = reader.ReadByte();
-            header.Unused1 = reader.ReadBytes(2); // Předpokládáme, že Unused1 má vždy 2 bajty
+            header.Unused1 = ReadBytesExact(reader, 2, "MZQ unused header bytes");
             header.MzfSize = reader.ReadUInt16();
             header.MzfStart = reader.ReadUInt16();
             header.MzfExec = reader.ReadUInt16();
 
             // Načtení prvních 38 bajtů pro MzfHeaderDescription
             header.MzfHeaderDescription = new byte[104]; // Inicializace pole 104 bajty
-            byte[] descriptionBytes = reader.ReadBytes(38); // Načtení pouze 38 bajtů
+            byte[] descriptionBytes = ReadBytesExact(reader, 38, "MZF header description");
             Array.Copy(descriptionBytes, header.MzfHeaderDescription, descriptionBytes.Length);
 
-            header.Crc = reader.ReadBytes(3); // Předpokládáme, že Crc má vždy 3 bajty
+            header.Crc = ReadBytesExact(reader, 3, "MZQ file header CRC marker");
 
             if (!ValidateQDiskMzfHeader(header))
             {
@@ -81,7 +81,7 @@ namespace QDTool
             }
 
             // Načtení začátku MZF Těla pro získání DataSize
-            byte[] mzfBodyStartBytes = reader.ReadBytes(7); // Předpokládáme, že prvních 7 bajtů obsahuje StartSign (4 bajty), MzfBodySign (1 bajt) a DataSize (2 bajty)
+            byte[] mzfBodyStartBytes = ReadBytesExact(reader, 7, "MZQ file body header");
             ushort bodyDataSize = BitConverter.ToUInt16(mzfBodyStartBytes, 5);
 
             // Načtení zbytku MZF Těla
@@ -90,13 +90,20 @@ namespace QDTool
                 StartSign = mzfBodyStartBytes.Take(4).ToArray(),
                 MzfBodySign = mzfBodyStartBytes[4],
                 DataSize = bodyDataSize,
-                MzfBody = reader.ReadBytes(bodyDataSize),
-                Crc = reader.ReadBytes(3)
+                MzfBody = ReadBytesExact(reader, bodyDataSize, "MZQ file body"),
+                Crc = ReadBytesExact(reader, 3, "MZQ file body CRC marker"),
+                TrailingData = Array.Empty<byte>()
             };
 
             if (!ValidateQDiskMzfBody(body))
             {
                 throw new InvalidOperationException("Neplatný MZF Header");
+            }
+
+            if (header.MzfSize != body.DataSize)
+            {
+                throw new InvalidDataException(
+                    $"MZF size mismatch: header declares {header.MzfSize} bytes, body declares {body.DataSize} bytes.");
             }
 
             return (header, body);
@@ -117,8 +124,14 @@ namespace QDTool
                     throw new InvalidOperationException("Neplatný MZQHeader");
                 }
 
+                if (header.FileBlocksCount % 2 != 0)
+                {
+                    throw new InvalidDataException("Invalid MZQ block count: header and body blocks must form pairs.");
+                }
+
                 // Read each MZF block
-                while ((reader.BaseStream.Position < reader.BaseStream.Length) && (mzfBlocks.Count() < header.FileBlocksCount / 2))
+                int fileCount = header.FileBlocksCount / 2;
+                for (int i = 0; i < fileCount; i++)
                 {
                     var mzfBlock = ReadMzfBlock(reader);
                     mzfBlocks.Add(mzfBlock);

@@ -63,6 +63,7 @@ public struct MZQFileBody
     public byte[] MzfBody; // body [body_size], maximum size 65535 bytes
     [MarshalAs(UnmanagedType.ByValArray, SizeConst = 3)]
     public byte[] Crc; // 3 bytes, C, R, C
+    public byte[] TrailingData; // optional MZF/MZT block-alignment bytes beyond the declared body size
 }
 
 public class MzfDisplayData
@@ -86,6 +87,18 @@ namespace QDTool
     /// </summary>
     public partial class MainWindow : Window
     {
+        private const int MaxQuickDiskFiles = byte.MaxValue / 2;
+        private const long QdfImageSize = 81936;
+        private const long QdfHeaderSize = 7655;
+        private const long QdfFileOverhead = 620;
+
+        private static readonly HashSet<string> ReservedWindowsFileNames = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "CON", "PRN", "AUX", "NUL",
+            "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+            "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+        };
+
         List<(MZQFileHeader, MZQFileBody)> mzfBlocks = new List<(MZQFileHeader, MZQFileBody)>();
         string actFileName = string.Empty;
 
@@ -105,6 +118,128 @@ namespace QDTool
             deleteButton.IsEnabled = false;
             clearAllButton.IsEnabled = false;
             saveButton.IsEnabled = false;
+        }
+
+        private static bool TryValidateBlock(
+            (MZQFileHeader Header, MZQFileBody Body) block,
+            int index,
+            out string error)
+        {
+            MZQFileHeader header = block.Header;
+            MZQFileBody body = block.Body;
+
+            if (header.StartSign is null || header.StartSign.Length != 4 ||
+                header.MzfFname is null || header.MzfFname.Length != 16 ||
+                header.Unused1 is null || header.Unused1.Length != 2 ||
+                header.MzfHeaderDescription is null || header.MzfHeaderDescription.Length != 104 ||
+                header.Crc is null || header.Crc.Length != 3 ||
+                body.StartSign is null || body.StartSign.Length != 4 ||
+                body.MzfBody is null || body.Crc is null || body.Crc.Length != 3)
+            {
+                error = $"File {index + 1} has an invalid or incomplete structure.";
+                return false;
+            }
+
+            if (body.MzfBody.Length != body.DataSize)
+            {
+                error = $"File {index + 1} declares {body.DataSize} data bytes but contains {body.MzfBody.Length}.";
+                return false;
+            }
+
+            if (header.MzfSize != body.DataSize)
+            {
+                error = $"File {index + 1} has inconsistent header ({header.MzfSize}) and body ({body.DataSize}) sizes.";
+                return false;
+            }
+
+            error = string.Empty;
+            return true;
+        }
+
+        private bool TryValidateAllBlocks(out string error)
+        {
+            if (mzfBlocks.Count == 0)
+            {
+                error = "There are no files to save.";
+                return false;
+            }
+
+            for (int i = 0; i < mzfBlocks.Count; i++)
+            {
+                if (!TryValidateBlock(mzfBlocks[i], i, out error))
+                {
+                    return false;
+                }
+            }
+
+            error = string.Empty;
+            return true;
+        }
+
+        private bool TryValidateOutputFormat(string extension, out string error)
+        {
+            if ((extension == ".mzq" || extension == ".qdf") && mzfBlocks.Count > MaxQuickDiskFiles)
+            {
+                error = $"The {extension.ToUpperInvariant()} format supports at most {MaxQuickDiskFiles} files.";
+                return false;
+            }
+
+            if (extension == ".qdf")
+            {
+                long requiredSize = QdfHeaderSize + mzfBlocks.Sum(block => QdfFileOverhead + block.Item2.DataSize);
+                if (requiredSize > QdfImageSize)
+                {
+                    error = $"The selected files need {requiredSize} bytes, but a QDF image can contain only {QdfImageSize} bytes.";
+                    return false;
+                }
+            }
+
+            error = string.Empty;
+            return true;
+        }
+
+        private static string SanitizeExportFileName(string fileName)
+        {
+            char[] invalidCharacters = System.IO.Path.GetInvalidFileNameChars();
+            string sanitized = new string(fileName
+                .Select(character => invalidCharacters.Contains(character) ? '_' : character)
+                .ToArray())
+                .Trim()
+                .TrimEnd('.');
+
+            if (string.IsNullOrWhiteSpace(sanitized) || sanitized == "." || sanitized == "..")
+            {
+                sanitized = "unnamed";
+            }
+
+            string firstNameSegment = sanitized.Split('.')[0];
+            if (ReservedWindowsFileNames.Contains(firstNameSegment))
+            {
+                sanitized = "_" + sanitized;
+            }
+
+            return sanitized;
+        }
+
+        private static string GetAvailableExportPath(
+            string exportPath,
+            string fileName,
+            HashSet<string> reservedPaths)
+        {
+            string safeName = SanitizeExportFileName(fileName);
+
+            for (int suffix = 1; ; suffix++)
+            {
+                string candidateName = suffix == 1
+                    ? $"{safeName}.mzf"
+                    : $"{safeName}_{suffix}.mzf";
+                string candidatePath = System.IO.Path.GetFullPath(System.IO.Path.Combine(exportPath, candidateName));
+
+                if (!File.Exists(candidatePath) && reservedPaths.Add(candidatePath))
+                {
+                    return candidatePath;
+                }
+            }
         }
 
         private void Window_DragEnter(object sender, DragEventArgs e)
@@ -158,32 +293,46 @@ namespace QDTool
                 MzfDisplayDataCollection.Add(displayData);
             }
         }
- 
+
         private void UpdateStatus()
         {
-            int totalSize = 0;
-            int sizeOnQDF = 4852 + 3;
-            int sizeOnMZQ = 7;
-            bool first = true;
+            long declaredSize = 0;
+            long trailingSize = 0;
+            long sizeOnQDF = QdfHeaderSize;
+            long sizeOnMZQ = 8;
 
             foreach (var block in mzfBlocks)
             {
-                MZQFileHeader header = block.Item1;
                 MZQFileBody body = block.Item2;
-                totalSize += header.MzfSize;
-                if (first)
-                {
-                    first = false;
-                    sizeOnQDF += 2810 + 69 + 273 + header.MzfSize + 5;
-                    sizeOnMZQ += 4 + 70 + 4 + header.MzfSize + 6;
-                }
-                else
-                {
-                    sizeOnQDF += 273 + 69 + 273 + header.MzfSize + 5;
-                    sizeOnMZQ += 4 + 70 + 4 + header.MzfSize + 6;
-                }
+                declaredSize += body.DataSize;
+                trailingSize += body.TrailingData?.Length ?? 0;
+                sizeOnQDF += QdfFileOverhead + body.DataSize;
+                sizeOnMZQ += 84 + body.DataSize;
             }
-            infoText.Content = $"Total {mzfBlocks.Count} files contain {totalSize} bytes, est. {(float)sizeOnQDF/819.36:F0}% of QDF or {(float)sizeOnMZQ / 614.71:F0}% of MZQ.";
+
+            bool truncate = truncateCheckBox.IsChecked == true;
+            long occupiedSize = declaredSize + (truncate ? 0 : trailingSize);
+            string trailingInfo = trailingSize > 0 && !truncate
+                ? $" ({declaredSize} declared + {trailingSize} trailing)"
+                : string.Empty;
+            infoText.Content = $"Total {mzfBlocks.Count} files occupy {occupiedSize} bytes{trailingInfo}, est. {(float)sizeOnQDF / 819.36:F0}% of QDF or {(float)sizeOnMZQ / 614.71:F0}% of MZQ.";
+            truncateCheckBox.IsEnabled = trailingSize > 0;
+            truncateCheckBox.ToolTip = trailingSize > 0
+                ? $"Remove {trailingSize} bytes beyond the declared MZF sizes from all subsequent saves and exports."
+                : "No trailing MZF/MZT data to remove.";
+
+            if (trailingSize == 0)
+            {
+                truncateCheckBox.IsChecked = false;
+            }
+        }
+
+        private void TruncateCheckBox_Changed(object sender, RoutedEventArgs e)
+        {
+            if (IsLoaded)
+            {
+                UpdateStatus();
+            }
         }
 
         private void button_Click_Open(object sender, RoutedEventArgs e)
@@ -213,6 +362,12 @@ namespace QDTool
 
         private void button_Click_Save(object sender, RoutedEventArgs e)
         {
+            if (!TryValidateAllBlocks(out string validationError))
+            {
+                MessageBox.Show(validationError, "Cannot save", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+
             SaveFileDialog saveFileDialog = new SaveFileDialog();
             saveFileDialog.Filter = "Quickdisk file (*.qdf)|*.qdf|Quickdisk file (*.mzq)|*.mzq|Multiple files tape (*.mzt)|*.mzt|Single tape file (*.mzf)|*.mzf|All files(*.*)|*.*";
             string filenameWithoutExtension = System.IO.Path.GetFileNameWithoutExtension(actFileName);
@@ -238,12 +393,18 @@ namespace QDTool
                 string filePath = saveFileDialog.FileName;
                 string fileExtension = System.IO.Path.GetExtension(filePath).ToLower();
 
+                if (!TryValidateOutputFormat(fileExtension, out validationError))
+                {
+                    MessageBox.Show(validationError, "Cannot save", MessageBoxButton.OK, MessageBoxImage.Error);
+                    return;
+                }
+
                 if (fileExtension == ".mzq")
                 {
                     using (var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write))
                     {
                         MZQFileReader mzqf = new MZQFileReader();
-                        mzqf.WriteMZQHeaderToFile(fileStream, (byte)(mzfBlocks.Count * 2)); // mělo by se zkontrolovat, jestli tam toho náhodou není moc ???
+                        mzqf.WriteMZQHeaderToFile(fileStream, checked((byte)(mzfBlocks.Count * 2)));
                         foreach (var (header, body) in mzfBlocks)
                         {
                             mzqf.WriteMZQFileHeaderToFile(fileStream, header);
@@ -256,20 +417,20 @@ namespace QDTool
                     using (var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write))
                     {
                         QDFFileReader qdfr = new QDFFileReader();
-                        qdfr.WriteQDFHeaderToFile(fileStream, (byte)(mzfBlocks.Count * 2)); // mělo by se zkontrolovat, jestli tam toho náhodou není moc ???
+                        qdfr.WriteQDFHeaderToFile(fileStream, checked((byte)(mzfBlocks.Count * 2)));
                         foreach (var (header, body) in mzfBlocks)
                         {
                             qdfr.WriteQDFFileHeaderToFile(fileStream, header);
                             qdfr.WriteQDFFileBodyToFile(fileStream, body);
                         }
                         long currentSize = fileStream.Length; // Aktuální velikost streamu
-                        long bytesToWrite = 81936 - currentSize; // Počet bytů, které je třeba doplnit
+                        long bytesToWrite = QdfImageSize - currentSize; // Počet bytů, které je třeba doplnit
                         qdfr.WriteBytesToStream(fileStream, 0x00, bytesToWrite);
                     }
                 }
                 else if (fileExtension == ".mzt" || fileExtension == ".mzf")
                 {
-                    if(fileExtension == ".mzf" && mzfBlocks.Count > 1)
+                    if (fileExtension == ".mzf" && mzfBlocks.Count > 1)
                     {
                         MessageBox.Show("MZF file should contain only one tape file. Please use Export button or Save as MZT file.", "MZF file limitation", MessageBoxButton.OK, MessageBoxImage.Warning);
                     }
@@ -282,6 +443,11 @@ namespace QDTool
                             {
                                 mztfr.WriteMZFFileHeaderToFile(fileStream, header);
                                 mztfr.WriteMZFFileBodyToFile(fileStream, body);
+                            }
+
+                            if (truncateCheckBox.IsChecked != true)
+                            {
+                                mztfr.WriteMZFTrailingDataToFile(fileStream, mzfBlocks[^1].Item2);
                             }
                         }
                     }
@@ -426,7 +592,7 @@ namespace QDTool
                     MessageBox.Show(ex.Message, "Error reading file", MessageBoxButton.OK, MessageBoxImage.Error);
                 }
 
-            LoadDataToGrid(mzfBlocks);
+                LoadDataToGrid(mzfBlocks);
             }
             else
             {
@@ -446,7 +612,7 @@ namespace QDTool
                 string filePath = openFileDialog.FileName;
                 AddFile(filePath);
 
-                if(this.Title == "QDTool")
+                if (this.Title == "QDTool")
                 {
                     string fileName = System.IO.Path.GetFileName(filePath);
                     this.Title = $"QDTool - {fileName}";
@@ -468,6 +634,12 @@ namespace QDTool
             {
                 var item = mzfBlocks[selectedIndex];
 
+                if (!TryValidateBlock(item, selectedIndex, out string validationError))
+                {
+                    MessageBox.Show(validationError, "Cannot export", MessageBoxButton.OK, MessageBoxImage.Error);
+                    return;
+                }
+
                 SaveFileDialog saveFileDialog = new SaveFileDialog();
                 saveFileDialog.Filter = "Single tape file (*.mzf)|*.mzf";
                 MZQFileHeader header = item.Item1;
@@ -483,6 +655,10 @@ namespace QDTool
                         MZTFileReader mztfr = new MZTFileReader();
                         mztfr.WriteMZFFileHeaderToFile(fileStream, header);
                         mztfr.WriteMZFFileBodyToFile(fileStream, body);
+                        if (truncateCheckBox.IsChecked != true)
+                        {
+                            mztfr.WriteMZFTrailingDataToFile(fileStream, body);
+                        }
                     }
                 }
             }
@@ -605,6 +781,12 @@ namespace QDTool
 
         private void button_Click_ExportAll(object sender, RoutedEventArgs e)
         {
+            if (!TryValidateAllBlocks(out string validationError))
+            {
+                MessageBox.Show(validationError, "Cannot export", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+
             OpenFileDialog dialog = new OpenFileDialog
             {
                 ValidateNames = false,
@@ -619,21 +801,26 @@ namespace QDTool
             {
                 string? exportPath = System.IO.Path.GetDirectoryName(dialog.FileName);
 
-                if(exportPath == null)
+                if (exportPath == null)
                 {
                     MessageBox.Show("Export path cannot be empty", "Invalid path", MessageBoxButton.OK, MessageBoxImage.Error);
                 }
                 else
                 {
+                    HashSet<string> reservedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     foreach (var (header, body) in mzfBlocks)
                     {
-                        string fileName = ConvertMzfNameToASCIIString(header.MzfFname) + ".mzf";
-                        string filePath = System.IO.Path.Combine(exportPath, fileName);
-                        using (var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write))
+                        string fileName = ConvertMzfNameToASCIIString(header.MzfFname);
+                        string filePath = GetAvailableExportPath(exportPath, fileName, reservedPaths);
+                        using (var fileStream = new FileStream(filePath, FileMode.CreateNew, FileAccess.Write))
                         {
                             MZTFileReader mztfr = new MZTFileReader();
                             mztfr.WriteMZFFileHeaderToFile(fileStream, header);
                             mztfr.WriteMZFFileBodyToFile(fileStream, body);
+                            if (truncateCheckBox.IsChecked != true)
+                            {
+                                mztfr.WriteMZFTrailingDataToFile(fileStream, body);
+                            }
                         }
                     }
                 }

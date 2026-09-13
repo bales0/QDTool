@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
@@ -54,6 +55,18 @@ namespace QDTool
                 endIndex = convertedBytes.Length;
             }
             return Encoding.ASCII.GetString(convertedBytes, 0, endIndex);
+        }
+
+        public static byte[] ReadBytesExact(BinaryReader reader, int count, string fieldName)
+        {
+            byte[] bytes = reader.ReadBytes(count);
+            if (bytes.Length != count)
+            {
+                throw new EndOfStreamException(
+                    $"Unexpected end of file while reading {fieldName}: expected {count} bytes, got {bytes.Length}.");
+            }
+
+            return bytes;
         }
 
         private static ushort crc = 0;

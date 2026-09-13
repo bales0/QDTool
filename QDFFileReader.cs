@@ -94,9 +94,9 @@ namespace QDTool
         public MZQHeader ReadQDFHeader(BinaryReader reader)
         {
             MZQHeader header = new MZQHeader();
-            header.StartSign = ZeroStartSign;
+            header.StartSign = ZeroStartSign.ToArray();
             header.FileBlocksCount = 0;
-            header.Crc = ZeroCrc;
+            header.Crc = ZeroCrc.ToArray();
 
             if (IsQDFHeader(reader))
             {
@@ -104,7 +104,7 @@ namespace QDTool
                 {
                     positions.Add(reader.BaseStream.Position);
                     positions.Add(3);
-                    header.StartSign = ExpectedStartSign;
+                    header.StartSign = ExpectedStartSign.ToArray();
                     CRC_check(0xA5, true);
                     header.FileBlocksCount = reader.ReadByte();
                     ushort crc = CRC_check(header.FileBlocksCount);
@@ -115,12 +115,12 @@ namespace QDTool
                     //CRC_check((byte)(readCRC & 0xFF));
                     //CRC_check((byte)(readCRC >> 8));
                     crc = CRC_check(readCRC);
-                    header.Crc = ExpectedCrc;
-                    if (readCRC != calculatedCRC || crc != 0) 
+                    header.Crc = ExpectedCrc.ToArray();
+                    if (readCRC != calculatedCRC || crc != 0)
                     {
-                        Array.Clear(header.StartSign, 0, header.StartSign.Length);
+                        header.StartSign = ZeroStartSign.ToArray();
                         header.FileBlocksCount = 0;
-                        Array.Clear(header.Crc, 0, header.Crc.Length);
+                        header.Crc = ZeroCrc.ToArray();
                     }
                 }
             }
@@ -137,9 +137,9 @@ namespace QDTool
             if (FindStartSequence(reader))
             {
                 positions.Add(reader.BaseStream.Position);
-                positions.Add(64+5);
+                positions.Add(64 + 5);
                 // Načtení jednotlivých členů struktury
-                header.StartSign = ExpectedStartSign;
+                header.StartSign = ExpectedStartSign.ToArray();
                 CRC_check(0xA5, true);
                 header.MzfHeaderSign = reader.ReadByte();
                 CRC_check(header.MzfHeaderSign);
@@ -147,14 +147,14 @@ namespace QDTool
                 CRC_check(header.DataSize);
                 header.MzfFtype = reader.ReadByte();
                 CRC_check(header.MzfFtype);
-                header.MzfFname = reader.ReadBytes(16); // Předpokládáme, že MzfFname má vždy 16 bajtů
+                header.MzfFname = ReadBytesExact(reader, 16, "QDF MZF file name");
                 for (int i = 0; i < 16; i++)
                 {
                     CRC_check(header.MzfFname[i]);
                 }
                 header.MzfFnameEnd = reader.ReadByte();
                 CRC_check(header.MzfFnameEnd);
-                header.Unused1 = reader.ReadBytes(2); // Předpokládáme, že Unused1 má vždy 2 bajty
+                header.Unused1 = ReadBytesExact(reader, 2, "QDF unused header bytes");
                 CRC_check(header.Unused1[0]);
                 CRC_check(header.Unused1[1]);
                 header.MzfSize = reader.ReadUInt16();
@@ -166,7 +166,7 @@ namespace QDTool
 
                 // Načtení prvních 38 bajtů pro MzfHeaderDescription
                 header.MzfHeaderDescription = new byte[104]; // Inicializace pole 104 bajty
-                byte[] descriptionBytes = reader.ReadBytes(38); // Načtení pouze 38 bajtů
+                byte[] descriptionBytes = ReadBytesExact(reader, 38, "QDF MZF header description");
                 Array.Copy(descriptionBytes, header.MzfHeaderDescription, descriptionBytes.Length);
                 for (int i = 0; i < 38; i++)
                 {
@@ -174,7 +174,7 @@ namespace QDTool
                 }
 
                 // Načtení CRC
-                header.Crc = ExpectedCrc;
+                header.Crc = ExpectedCrc.ToArray();
                 ushort readCRC = reader.ReadUInt16();
                 ushort crc = CRC_check(readCRC);
 
@@ -196,19 +196,20 @@ namespace QDTool
                     // ushort bodyDataSize = // BitConverter.ToUInt16(mzfBodyStartBytes, 5);
 
                     positions.Add(reader.BaseStream.Position);
-                    body.StartSign = ExpectedStartSign;
+                    body.StartSign = ExpectedStartSign.ToArray();
                     CRC_check(0xA5, true);
                     body.MzfBodySign = reader.ReadByte();
                     CRC_check(body.MzfBodySign);
                     body.DataSize = reader.ReadUInt16();
                     positions.Add(body.DataSize + 5);
                     CRC_check(body.DataSize);
-                    body.MzfBody = reader.ReadBytes(body.DataSize);
+                    body.MzfBody = ReadBytesExact(reader, body.DataSize, "QDF MZF file body");
+                    body.TrailingData = Array.Empty<byte>();
                     for (int i = 0; i < body.DataSize; i++)
                     {
                         CRC_check(body.MzfBody[i]);
                     }
-                    body.Crc = ExpectedCrc;
+                    body.Crc = ExpectedCrc.ToArray();
                     readCRC = reader.ReadUInt16();
                     crc = CRC_check(readCRC);
 
@@ -227,6 +228,16 @@ namespace QDTool
                 {
                     throw new InvalidOperationException("Missing data block after header block.");
                 }
+
+                if (header.MzfSize != body.DataSize)
+                {
+                    throw new InvalidDataException(
+                        $"MZF size mismatch: header declares {header.MzfSize} bytes, body declares {body.DataSize} bytes.");
+                }
+            }
+            else
+            {
+                throw new InvalidDataException("Missing QDF MZF header block.");
             }
             return (header, body);
         }
@@ -246,14 +257,17 @@ namespace QDTool
                     throw new InvalidOperationException("Neplatný QDFHeader");
                 }
 
+                if (header.FileBlocksCount % 2 != 0)
+                {
+                    throw new InvalidDataException("Invalid QDF block count: header and body blocks must form pairs.");
+                }
+
                 //// Read each MZF block
-                while ((reader.BaseStream.Position < reader.BaseStream.Length) && (mzfBlocks.Count() < header.FileBlocksCount / 2))
+                int fileCount = header.FileBlocksCount / 2;
+                for (int i = 0; i < fileCount; i++)
                 {
                     var mzfBlock = ReadQDFMzfBlock(reader);
-                    if(mzfBlock.Item1.MzfFname != null) 
-                    {
-                        mzfBlocks.Add(mzfBlock);
-                    }
+                    mzfBlocks.Add(mzfBlock);
                 }
 
                 currentPosition = fs.Position;
