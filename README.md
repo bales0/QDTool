@@ -19,7 +19,7 @@ You can also reorder, add or delete files. Drag&Drop is supported. For example, 
 **QD** - VirtuaQD tools QuickDisk file format.  
 
 ### Requirements
-QDTool is Windows WPF application and requires .NET Framework 6.0 to run. It is written in C# in Microsoft Visual Studio 2022.
+QDTool is a Windows WPF application and requires the .NET 10 Desktop Runtime to run. It is written in C# in Microsoft Visual Studio 2022.
 
 ### Releases
 **2024-02-25  0.1.0 alpha** - first alpha release
