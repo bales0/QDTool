@@ -19,7 +19,6 @@ namespace QDTool
         Ic1_4,
         Tc1_2,
         Tc1_3,
-        Tc1_4,
         Ultra,
         UltraMz800,
         UltraMz700
@@ -184,7 +183,6 @@ namespace QDTool
             TapeProfile.Ic1_4 => "IC 1:4",
             TapeProfile.Tc1_2 => "TC 1:2",
             TapeProfile.Tc1_3 => "TC 1:3",
-            TapeProfile.Tc1_4 => "TC 1:4",
             TapeProfile.Ultra => "UL",
             TapeProfile.UltraMz800 => "UL_MZ800",
             TapeProfile.UltraMz700 => "UL_MZ700",
@@ -201,7 +199,8 @@ namespace QDTool
 
         private static readonly string[] NormalSpeeds = ["1:1", "1:2", "1:3", "1:4"];
         private static readonly string[] Mz700Speeds = ["1:1", "1:3"];
-        private static readonly string[] AcceleratedSpeeds = ["1:2", "1:3", "1:4"];
+        private static readonly string[] IcSpeeds = ["1:2", "1:3", "1:4"];
+        private static readonly string[] TcSpeeds = ["1:2", "1:3"];
         private static readonly string[] NoSpeed = [""];
 
         public static IReadOnlyList<string> LoaderTypes => AllLoaders;
@@ -210,7 +209,8 @@ namespace QDTool
         {
             "NORMAL" => NormalSpeeds,
             "MZ700" => Mz700Speeds,
-            "IC" or "TC" => AcceleratedSpeeds,
+            "IC" => IcSpeeds,
+            "TC" => TcSpeeds,
             "UL" or "UL_MZ800" or "UL_MZ700" => NoSpeed,
             _ => NormalSpeeds
         };
@@ -236,7 +236,6 @@ namespace QDTool
             TapeProfile.Ic1_4 => ("IC", "1:4"),
             TapeProfile.Tc1_2 => ("TC", "1:2"),
             TapeProfile.Tc1_3 => ("TC", "1:3"),
-            TapeProfile.Tc1_4 => ("TC", "1:4"),
             TapeProfile.Ultra => ("UL", ""),
             TapeProfile.UltraMz800 => ("UL_MZ800", ""),
             TapeProfile.UltraMz700 => ("UL_MZ700", ""),
@@ -259,7 +258,6 @@ namespace QDTool
                 ("IC", "1:4") => TapeProfile.Ic1_4,
                 ("TC", "1:2") => TapeProfile.Tc1_2,
                 ("TC", "1:3") => TapeProfile.Tc1_3,
-                ("TC", "1:4") => TapeProfile.Tc1_4,
                 ("UL", "") => TapeProfile.Ultra,
                 ("UL_MZ800", "") => TapeProfile.UltraMz800,
                 ("UL_MZ700", "") => TapeProfile.UltraMz700,

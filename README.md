@@ -12,9 +12,11 @@ You can also reorder, add or delete files. Drag&Drop is supported. For example, 
 **MZT** - Multiple MZF tape files concatenated one after the other as on tape, supported by MZ700Win, UniCMT.  
 **LEP** - Export to a compact signed pulse-duration stream with 50 microsecond resolution.
 **L16** - Export to a signed pulse-duration stream with finer 16 microsecond resolution.
-**WAV** - Export to standard 44.1 kHz, 8-bit mono PCM audio for playback into a SHARP MZ-700/800.
+**WAV** - Export to standard 44.1 kHz, 8-bit mono PCM audio for playback into a SHARP MZ-700/800. Fractional edge durations are preserved over time by accumulated quantization-error correction.
 
-LEP, L16 and WAV exports use the loader and speed assigned to each record. NORMAL 1:1 through 1:4, MZ700 1:1/FAST3, IC 1:2 through 1:4 and TC 1:2 through 1:4 are generated from the MZ-SD2CMT2-Reborn timings and loader routines. UL profiles require a live WRITE/SENSE handshake and are therefore rejected for static waveform export. The compact stream contains only the blocks required by the selected profile; optional monitor backup copies are not written.
+LEP, L16 and WAV exports use the loader and speed assigned to each record. NORMAL 1:1 through 1:4, MZ700 1:1/FAST3, IC 1:2 through 1:4 and TC 1:2 through 1:3 are generated from the MZ-SD2CMT2-Reborn timings and loader routines. UL profiles require a live WRITE/SENSE handshake and are therefore rejected for static waveform export. The compact stream contains only the blocks required by the selected profile; optional monitor backup copies are not written.
+
+All waveform profiles use 11000 SHORT pulses for a header leader and 5500 SHORT pulses for every data/loader leader. NORMAL 1:1 uses context-dependent LOW widths from the MZ-800 1Z-013B ROM; NORMAL/IC accelerated timings use the Intercopy V10.2 writer rows (the historical 1:3 and 1:4 labels mean 7:3 and 8:3), and TC 1:2/1:3 uses the Turbo Copy V1.22 8253 counter model.
 
 ### There is work in progress on support for the following file types:
 **RAW** - Raw data grabbed from QuickDisk by QDC.  

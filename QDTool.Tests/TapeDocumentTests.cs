@@ -205,6 +205,17 @@ public class TapeDocumentTests
         }
     }
 
+    [Fact]
+    public void TcOffersOnlyAnalyzedTwoAndThreeTimesSpeeds()
+    {
+        Assert.Equal(
+            new[] { "1:2", "1:3" },
+            TapeProfileComponents.GetAvailableSpeeds("TC"));
+        Assert.Equal("1:2", TapeProfileComponents.NormalizeSpeed("TC", "1:4"));
+        Assert.False(SidecarService.TryParseProfile(
+            ["TYPE=TC", "SPEED=1:4"], out _));
+    }
+
     [Theory]
     [InlineData("NORMAL", "1:4", "1:4")]
     [InlineData("MZ700", "1:2", "1:1")]

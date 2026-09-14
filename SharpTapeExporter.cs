@@ -20,7 +20,16 @@ namespace QDTool
 
     internal static class SharpTapeExporter
     {
-        private const int WavSampleRate = 44100;
+        // Required output rate. Fractional edge durations are preserved over
+        // time by the WavSink quantization-error accumulator.
+        internal const int WavSampleRate = 44100;
+
+        private enum PulseRegion
+        {
+            Leader,
+            TapeMark,
+            Data
+        }
 
         public static void Export(
             string filePath,
@@ -191,39 +200,61 @@ namespace QDTool
             bool trailingPulseIsLong,
             bool invertSignal)
         {
-            WritePulses(sink, profile, isLong: false, leaderPulses, invertSignal);
-            WritePulses(sink, profile, isLong: true, markLongPulses, invertSignal);
-            WritePulses(sink, profile, isLong: false, markShortPulses, invertSignal);
-            WritePulses(sink, profile, isLong: true, finalMarkLongPulses, invertSignal);
-            WriteData(sink, profile, data, invertSignal);
-            WriteChecksum(sink, profile, ComputeChecksum(data), invertSignal);
-            WritePulses(sink, profile, trailingPulseIsLong, trailingPulses, invertSignal);
+            WritePulses(
+                sink, profile, isLong: false, leaderPulses, invertSignal, PulseRegion.Leader);
+            WritePulses(
+                sink, profile, isLong: true, markLongPulses, invertSignal, PulseRegion.TapeMark);
+            WritePulses(
+                sink, profile, isLong: false, markShortPulses, invertSignal, PulseRegion.TapeMark);
+            WritePulses(
+                sink, profile, isLong: true, finalMarkLongPulses, invertSignal, PulseRegion.TapeMark);
+            WriteFramedData(
+                sink, profile, data, ComputeChecksum(data), trailingPulses, trailingPulseIsLong, invertSignal);
         }
 
-        private static void WriteData(
+        private static void WriteFramedData(
             TapeSink sink,
             SharpPulseProfile profile,
             byte[] data,
+            ushort checksum,
+            int trailingPulses,
+            bool trailingPulseIsLong,
             bool invertSignal)
         {
-            foreach (byte value in data)
+            int framedPulseCount = checked((data.Length + 2) * 9);
+            int totalPulseCount = checked(framedPulseCount + trailingPulses);
+            for (int pulseIndex = 0; pulseIndex < totalPulseCount; pulseIndex++)
             {
-                for (int bit = 7; bit >= 0; bit--)
-                {
-                    WritePulse(sink, profile, (value & (1 << bit)) != 0, invertSignal);
-                }
-
-                WritePulse(sink, profile, isLong: true, invertSignal);
+                bool isLong = GetFramedPulse(data, checksum, framedPulseCount, pulseIndex, trailingPulseIsLong);
+                bool nextIsLong = pulseIndex + 1 < totalPulseCount &&
+                    GetFramedPulse(data, checksum, framedPulseCount, pulseIndex + 1, trailingPulseIsLong);
+                WritePulse(sink, profile, isLong, invertSignal, PulseRegion.Data, nextIsLong);
             }
         }
 
-        private static void WriteChecksum(
-            TapeSink sink,
-            SharpPulseProfile profile,
+        private static bool GetFramedPulse(
+            byte[] data,
             ushort checksum,
-            bool invertSignal)
+            int framedPulseCount,
+            int pulseIndex,
+            bool trailingPulseIsLong)
         {
-            WriteData(sink, profile, new[] { (byte)(checksum >> 8), (byte)checksum }, invertSignal);
+            if (pulseIndex >= framedPulseCount)
+            {
+                return trailingPulseIsLong;
+            }
+
+            int byteIndex = pulseIndex / 9;
+            int pulseInByte = pulseIndex % 9;
+            if (pulseInByte == 8)
+            {
+                return true;
+            }
+
+            byte value = byteIndex < data.Length
+                ? data[byteIndex]
+                : byteIndex == data.Length ? (byte)(checksum >> 8) : (byte)checksum;
+            return (value & (1 << (7 - pulseInByte))) != 0;
         }
 
         private static void WritePulses(
@@ -231,11 +262,12 @@ namespace QDTool
             SharpPulseProfile profile,
             bool isLong,
             int count,
-            bool invertSignal)
+            bool invertSignal,
+            PulseRegion region)
         {
             for (int i = 0; i < count; i++)
             {
-                WritePulse(sink, profile, isLong, invertSignal);
+                WritePulse(sink, profile, isLong, invertSignal, region, nextIsLong: isLong);
             }
         }
 
@@ -243,10 +275,12 @@ namespace QDTool
             TapeSink sink,
             SharpPulseProfile profile,
             bool isLong,
-            bool invertSignal)
+            bool invertSignal,
+            PulseRegion region,
+            bool nextIsLong)
         {
             double highDuration = isLong ? profile.LongHighMicroseconds : profile.ShortHighMicroseconds;
-            double lowDuration = isLong ? profile.LongLowMicroseconds : profile.ShortLowMicroseconds;
+            double lowDuration = GetLowDuration(profile, isLong, region, nextIsLong);
             if (invertSignal)
             {
                 sink.WriteInterval(high: false, lowDuration);
@@ -257,6 +291,30 @@ namespace QDTool
                 sink.WriteInterval(high: true, highDuration);
                 sink.WriteInterval(high: false, lowDuration);
             }
+        }
+
+        private static double GetLowDuration(
+            SharpPulseProfile profile,
+            bool isLong,
+            PulseRegion region,
+            bool nextIsLong)
+        {
+            if (profile.TimingSource != SharpPulseTimingSource.Mz800Rom1Z013B)
+            {
+                return isLong ? profile.LongLowMicroseconds : profile.ShortLowMicroseconds;
+            }
+
+            return region switch
+            {
+                PulseRegion.Leader when !isLong => SharpTapeProfileEncoder.RomTicks(918),
+                PulseRegion.TapeMark when isLong => SharpTapeProfileEncoder.RomTicks(1728),
+                PulseRegion.TapeMark => SharpTapeProfileEncoder.RomTicks(908),
+                PulseRegion.Data when isLong && nextIsLong => SharpTapeProfileEncoder.RomTicks(1716),
+                PulseRegion.Data when isLong => SharpTapeProfileEncoder.RomTicks(1726),
+                PulseRegion.Data when nextIsLong => SharpTapeProfileEncoder.RomTicks(896),
+                PulseRegion.Data => SharpTapeProfileEncoder.RomTicks(906),
+                _ => throw new InvalidOperationException("Invalid native MZ-800 pulse context.")
+            };
         }
 
         private static void WriteDelay(TapeSink sink, bool invertSignal, int milliseconds)

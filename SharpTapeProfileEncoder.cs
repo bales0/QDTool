@@ -4,11 +4,18 @@ using System.Collections.Generic;
 
 namespace QDTool
 {
+    internal enum SharpPulseTimingSource
+    {
+        Fixed,
+        Mz800Rom1Z013B
+    }
+
     internal readonly record struct SharpPulseProfile(
         double ShortHighMicroseconds,
         double ShortLowMicroseconds,
         double LongHighMicroseconds,
-        double LongLowMicroseconds);
+        double LongLowMicroseconds,
+        SharpPulseTimingSource TimingSource = SharpPulseTimingSource.Fixed);
 
     internal readonly record struct SharpTapeStage(
         byte[] Data,
@@ -24,18 +31,30 @@ namespace QDTool
 
     internal static class SharpTapeProfileEncoder
     {
-        private static readonly SharpPulseProfile Mz800Normal = new(250, 250, 500, 500);
-        private static readonly SharpPulseProfile Mz800Normal2 = new(136.125, 136.125, 276.5625, 276.5625);
-        private static readonly SharpPulseProfile Mz800Normal3 = new(113.1875, 113.1875, 204.0625, 204.0625);
-        private static readonly SharpPulseProfile Mz800Normal4 = new(112, 80, 176, 160);
+        private const double Mz800RomClockHz = 3_546_875.0;
+        private const double TurboCopyClockMhz = 1.10;
+
+        // Native MZ-800 monitor 1Z-013B. LOW widths are selected by the
+        // waveform writer from leader/mark/data context and the following bit.
+        private static readonly SharpPulseProfile Mz800Normal =
+            new(RomTicks(844), RomTicks(906), RomTicks(1664), RomTicks(1726), SharpPulseTimingSource.Mz800Rom1Z013B);
+
+        // Intercopy V10.2 writer rows. Labels 1:3 and 1:4 historically mean
+        // the actual 7:3 (2800 Bd) and 8:3 (3200 Bd) ratios.
+        private static readonly SharpPulseProfile Intercopy1200 = new(234.573, 263.894, 469.145, 494.802);
+        private static readonly SharpPulseProfile Intercopy2400 = new(113.621, 139.278, 234.573, 260.229);
+        private static readonly SharpPulseProfile Intercopy2800 = new(87.965, 124.617, 175.930, 223.577);
+        private static readonly SharpPulseProfile Intercopy3200 = new(76.969, 117.286, 157.604, 179.595);
         private static readonly SharpPulseProfile Mz700Normal = new(240, 264, 464, 494);
         private static readonly SharpPulseProfile Mz700Fast3 = new(80, 80, 160, 160);
-        private static readonly SharpPulseProfile Ic2 = new(144, 112, 256, 224);
-        private static readonly SharpPulseProfile Ic3 = new(112, 96, 224, 192);
-        private static readonly SharpPulseProfile Ic4 = new(112, 80, 176, 160);
-        private static readonly SharpPulseProfile Tc2 = new(144, 144, 288, 288);
-        private static readonly SharpPulseProfile Tc3 = new(112, 112, 204, 204);
-        private static readonly SharpPulseProfile Tc4 = Ic4;
+
+        // TurboCopy V1.22, 8253 MODE 3 at nominal CKMS 1.10 MHz.
+        // TC 2x: SHORT_COUNT=311 -> 156/155 ticks, LONG_COUNT=622 -> 311/311.
+        private static readonly SharpPulseProfile Tc2 =
+            new(TcTicks(156), TcTicks(155), TcTicks(311), TcTicks(311));
+        // TC 3x: SHORT_COUNT=231 -> 116/115 ticks, LONG_COUNT=462 -> 231/231.
+        private static readonly SharpPulseProfile Tc3 =
+            new(TcTicks(116), TcTicks(115), TcTicks(231), TcTicks(231));
 
         private static readonly byte[] IcLoader =
         [
@@ -107,18 +126,17 @@ namespace QDTool
 
             return profile switch
             {
-                TapeProfile.Normal1_1 => BuildConventional(header, body, Mz800Normal, 6344, 6344),
-                TapeProfile.Normal1_2 => BuildConventional(header, body, Mz800Normal2, 11239, 11239),
-                TapeProfile.Normal1_3 => BuildConventional(header, body, Mz800Normal3, 15130, 15130),
-                TapeProfile.Normal1_4 => BuildConventional(header, body, Mz800Normal4, 11000, 5500),
-                TapeProfile.Mz700_1_1 => BuildConventional(header, body, Mz700Normal, 22000, 11000),
+                TapeProfile.Normal1_1 => BuildConventional(header, body, Mz800Normal),
+                TapeProfile.Normal1_2 => BuildConventional(header, body, Intercopy2400),
+                TapeProfile.Normal1_3 => BuildConventional(header, body, Intercopy2800),
+                TapeProfile.Normal1_4 => BuildConventional(header, body, Intercopy3200),
+                TapeProfile.Mz700_1_1 => BuildConventional(header, body, Mz700Normal),
                 TapeProfile.Mz700_1_3 => BuildMz700Fast3(header, body),
-                TapeProfile.Ic1_2 => BuildIc(header, body, Ic2, 0x20),
-                TapeProfile.Ic1_3 => BuildIc(header, body, Ic3, 0x16),
-                TapeProfile.Ic1_4 => BuildIc(header, body, Ic4, 0x11),
-                TapeProfile.Tc1_2 => BuildTc(header, body, Tc2, 0x29, 11239),
-                TapeProfile.Tc1_3 => BuildTc(header, body, Tc3, 0x1B, 15130),
-                TapeProfile.Tc1_4 => BuildTc(header, body, Tc4, 0x16, 5500),
+                TapeProfile.Ic1_2 => BuildIc(header, body, Intercopy2400, 0x20),
+                TapeProfile.Ic1_3 => BuildIc(header, body, Intercopy2800, 0x16),
+                TapeProfile.Ic1_4 => BuildIc(header, body, Intercopy3200, 0x11),
+                TapeProfile.Tc1_2 => BuildTc(header, body, Tc2, 0x29),
+                TapeProfile.Tc1_3 => BuildTc(header, body, Tc3, 0x1B),
                 TapeProfile.Ultra or TapeProfile.UltraMz800 or TapeProfile.UltraMz700 =>
                     throw new InvalidOperationException(
                         $"{TapeProfileNames.ToDisplayName(profile)} uses a live WRITE/SENSE handshake and cannot be exported as a static WAV/LEP/L16 waveform."),
@@ -127,10 +145,10 @@ namespace QDTool
         }
 
         private static IReadOnlyList<SharpTapeStage> BuildConventional(
-            byte[] header, byte[] body, SharpPulseProfile pulses, int headerLeader, int dataLeader) =>
+            byte[] header, byte[] body, SharpPulseProfile pulses) =>
         [
-            HeaderStage(header, pulses, headerLeader),
-            DataStage(body, pulses, dataLeader)
+            HeaderStage(header, pulses),
+            DataStage(body, pulses)
         ];
 
         private static IReadOnlyList<SharpTapeStage> BuildIc(
@@ -153,8 +171,8 @@ namespace QDTool
             Array.Copy(IcLoader, 0, header, 32, IcLoader.Length);
             return
             [
-                HeaderStage(header, Mz800Normal, 6344),
-                DataStage(body, turboPulses, 5500, invertSignal: true, delayBeforeMilliseconds: 345)
+                HeaderStage(header, Intercopy1200),
+                DataStage(body, turboPulses, invertSignal: true, delayBeforeMilliseconds: 345)
             ];
         }
 
@@ -162,8 +180,7 @@ namespace QDTool
             byte[] originalHeader,
             byte[] body,
             SharpPulseProfile turboPulses,
-            byte speedByte,
-            int turboLeader)
+            byte speedByte)
         {
             ValidateLoaderInput(originalHeader, body, requireMachineCode: false);
             if (RangesOverlap(0xD400, TcLoaderTemplate.Length, ReadU16(originalHeader, 20), body.Length))
@@ -183,9 +200,9 @@ namespace QDTool
             Array.Copy(originalHeader, 18, loader, 0x4D, 13);
             return
             [
-                HeaderStage(header, Mz800Normal, 6344, invertSignal: true),
-                DataStage(loader, Mz800Normal, 6344, invertSignal: true, trailingPulses: 98, trailingLong: false),
-                DataStage(body, turboPulses, turboLeader, invertSignal: true, trailingPulses: 98, trailingLong: false, delayBeforeMilliseconds: 110)
+                HeaderStage(header, Mz800Normal, invertSignal: true),
+                DataStage(loader, Mz800Normal, invertSignal: true, trailingPulses: 98, trailingLong: false),
+                DataStage(body, turboPulses, invertSignal: true, trailingPulses: 98, trailingLong: false, delayBeforeMilliseconds: 110)
             ];
         }
 
@@ -212,8 +229,8 @@ namespace QDTool
             byte[] header = BuildMz700Fast3Header(originalHeader, runtimeAddress, runtimeSize);
             return
             [
-                HeaderStage(header, Mz800Normal, 6344),
-                DataStage(body, Mz700Fast3, 5500, delayBeforeMilliseconds: 400)
+                HeaderStage(header, Mz800Normal),
+                DataStage(body, Mz700Fast3, delayBeforeMilliseconds: 400)
             ];
         }
 
@@ -357,23 +374,26 @@ namespace QDTool
             leftStart < rightStart + rightLength && rightStart < leftStart + leftLength;
 
         private static SharpTapeStage HeaderStage(
-            byte[] data, SharpPulseProfile pulses, int leader, bool invertSignal = false) =>
-            new(data, pulses, leader, 40, 40, 2, 2, true, invertSignal);
+            byte[] data, SharpPulseProfile pulses, bool invertSignal = false) =>
+            new(data, pulses, 11000, 40, 40, 2, 2, true, invertSignal);
 
         private static SharpTapeStage DataStage(
             byte[] data,
             SharpPulseProfile pulses,
-            int leader,
             bool invertSignal = false,
             int trailingPulses = 2,
             bool trailingLong = true,
             int delayBeforeMilliseconds = 0) =>
-            new(data, pulses, leader, 20, 20, 2, trailingPulses, trailingLong, invertSignal, delayBeforeMilliseconds);
+            new(data, pulses, 5500, 20, 20, 2, trailingPulses, trailingLong, invertSignal, delayBeforeMilliseconds);
 
         private static ushort ReadU16(byte[] data, int offset) =>
             BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(offset, 2));
 
         private static void WriteU16(byte[] data, int offset, ushort value) =>
             BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(offset, 2), value);
+
+        internal static double RomTicks(int ticks) => ticks * 1_000_000.0 / Mz800RomClockHz;
+
+        internal static double TcTicks(int ticks) => ticks / TurboCopyClockMhz;
     }
 }
