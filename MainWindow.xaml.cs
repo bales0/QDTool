@@ -220,6 +220,11 @@ namespace QDTool
         {
             if (mzfBlocks.Count == 0)
             {
+                if (document.Format is TapeDocumentFormat.QdSharpLegacy or TapeDocumentFormat.QdHxc or TapeDocumentFormat.QdFlashFloppy)
+                {
+                    error = string.Empty;
+                    return true;
+                }
                 error = "There are no files to save.";
                 return false;
             }
@@ -236,15 +241,23 @@ namespace QDTool
             return true;
         }
 
-        private bool TryValidateOutputFormat(string extension, out string error)
+        private bool TryValidateOutputFormat(TapeDocumentFormat outputFormat, string extension, out string error)
         {
-            if ((extension == ".mzq" || extension == ".qdf") && mzfBlocks.Count > MaxQuickDiskFiles)
+            if (mzfBlocks.Count == 0 && outputFormat is TapeDocumentFormat.Mzf or TapeDocumentFormat.Mzt or TapeDocumentFormat.None)
+            {
+                error = $"The {extension.ToUpperInvariant()} format requires at least one file.";
+                return false;
+            }
+
+            if ((outputFormat is TapeDocumentFormat.Mzq or TapeDocumentFormat.Qdf or
+                TapeDocumentFormat.QdSharpLegacy or TapeDocumentFormat.QdHxc or TapeDocumentFormat.QdFlashFloppy) &&
+                mzfBlocks.Count > MaxQuickDiskFiles)
             {
                 error = $"The {extension.ToUpperInvariant()} format supports at most {MaxQuickDiskFiles} files.";
                 return false;
             }
 
-            if (extension == ".qdf")
+            if (outputFormat == TapeDocumentFormat.Qdf)
             {
                 long requiredSize = QdfHeaderSize + mzfBlocks.Sum(block => QdfFileOverhead + block.Body.DataSize);
                 if (requiredSize > QdfImageSize)
@@ -254,8 +267,60 @@ namespace QDTool
                 }
             }
 
+            if (outputFormat == TapeDocumentFormat.QdSharpLegacy &&
+                !SharpLegacyQdCodec.TryValidateCapacity(mzfBlocks, out error))
+            {
+                return false;
+            }
+
+            if (outputFormat is TapeDocumentFormat.QdHxc or TapeDocumentFormat.QdFlashFloppy)
+            {
+                QdImageFormat physicalFormat = outputFormat == TapeDocumentFormat.QdHxc
+                    ? QdImageFormat.HxcPhysical
+                    : QdImageFormat.FlashFloppyPhysical;
+                if (!QuickDiskPhysicalWriter.TryValidateCapacity(mzfBlocks, physicalFormat, out error))
+                {
+                    return false;
+                }
+            }
+
             error = string.Empty;
             return true;
+        }
+
+        internal static int GetSaveFilterIndex(TapeDocumentFormat format) => format switch
+        {
+            TapeDocumentFormat.Qdf => 1,
+            TapeDocumentFormat.Mzq => 2,
+            TapeDocumentFormat.QdHxc => 3,
+            TapeDocumentFormat.QdFlashFloppy => 4,
+            TapeDocumentFormat.QdSharpLegacy => 5,
+            TapeDocumentFormat.Mzt => 6,
+            TapeDocumentFormat.Mzf => 7,
+            _ => 1
+        };
+
+        internal static TapeDocumentFormat ResolveSaveFormat(string extension, int filterIndex)
+        {
+            if (extension == ".qd")
+            {
+                return filterIndex switch
+                {
+                    3 => TapeDocumentFormat.QdHxc,
+                    4 => TapeDocumentFormat.QdFlashFloppy,
+                    5 => TapeDocumentFormat.QdSharpLegacy,
+                    _ => TapeDocumentFormat.None
+                };
+            }
+
+            return extension switch
+            {
+                ".qdf" => TapeDocumentFormat.Qdf,
+                ".mzq" => TapeDocumentFormat.Mzq,
+                ".mzt" => TapeDocumentFormat.Mzt,
+                ".mzf" => TapeDocumentFormat.Mzf,
+                _ => TapeDocumentFormat.None
+            };
         }
 
         private static string SanitizeExportFileName(string fileName)
@@ -567,28 +632,22 @@ namespace QDTool
             saveFileDialog.Filter = GetSaveFilter();
             string filenameWithoutExtension = System.IO.Path.GetFileNameWithoutExtension(actFileName);
             saveFileDialog.FileName = filenameWithoutExtension;
-            string extension = System.IO.Path.GetExtension(actFileName).ToLower();
-            int filterIndex = 1; // Default to the first filter
-            if (extension == ".mzq")
-            {
-                filterIndex = 2;
-            }
-            else if (extension == ".mzt")
-            {
-                filterIndex = 3;
-            }
-            else if (extension == ".mzf")
-            {
-                filterIndex = 4;
-            }
-            saveFileDialog.FilterIndex = filterIndex;
+            saveFileDialog.FilterIndex = GetSaveFilterIndex(document.Format);
 
             if (saveFileDialog.ShowDialog() == true)
             {
                 string filePath = saveFileDialog.FileName;
                 string fileExtension = System.IO.Path.GetExtension(filePath).ToLower();
+                TapeDocumentFormat outputFormat = ResolveSaveFormat(fileExtension, saveFileDialog.FilterIndex);
 
-                if (!TryValidateOutputFormat(fileExtension, out validationError))
+                bool waveformOutput = AdvancedFeaturesEnabled && fileExtension is ".lep" or ".l16" or ".wav";
+                if (outputFormat == TapeDocumentFormat.None && !waveformOutput)
+                {
+                    MessageBox.Show($"The selected filter does not define a writer for {fileExtension}.", "Cannot save", MessageBoxButton.OK, MessageBoxImage.Error);
+                    return;
+                }
+
+                if (!TryValidateOutputFormat(outputFormat, fileExtension, out validationError))
                 {
                     MessageBox.Show(validationError, "Cannot save", MessageBoxButton.OK, MessageBoxImage.Error);
                     return;
@@ -596,7 +655,7 @@ namespace QDTool
 
                 try
                 {
-                    if (fileExtension == ".mzq")
+                    if (outputFormat == TapeDocumentFormat.Mzq)
                     {
                         using (var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write))
                         {
@@ -611,7 +670,7 @@ namespace QDTool
                         DiscardMetadataNotStoredByCurrentFormat();
                         SetCurrentDocumentAfterSave(filePath, TapeDocumentFormat.Mzq, sidecarPath: null);
                     }
-                    else if (fileExtension == ".qdf")
+                    else if (outputFormat == TapeDocumentFormat.Qdf)
                     {
                         using (var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write))
                         {
@@ -629,7 +688,19 @@ namespace QDTool
                         DiscardMetadataNotStoredByCurrentFormat();
                         SetCurrentDocumentAfterSave(filePath, TapeDocumentFormat.Qdf, sidecarPath: null);
                     }
-                    else if (fileExtension == ".mzf")
+                    else if (outputFormat is TapeDocumentFormat.QdHxc or TapeDocumentFormat.QdFlashFloppy or TapeDocumentFormat.QdSharpLegacy)
+                    {
+                        QdImageFormat qdFormat = outputFormat switch
+                        {
+                            TapeDocumentFormat.QdHxc => QdImageFormat.HxcPhysical,
+                            TapeDocumentFormat.QdFlashFloppy => QdImageFormat.FlashFloppyPhysical,
+                            _ => QdImageFormat.SharpLegacyLogical
+                        };
+                        File.WriteAllBytes(filePath, QdImageReaderWriter.Write(mzfBlocks, qdFormat));
+                        DiscardMetadataNotStoredByCurrentFormat();
+                        SetCurrentDocumentAfterSave(filePath, outputFormat, sidecarPath: null);
+                    }
+                    else if (outputFormat == TapeDocumentFormat.Mzf)
                     {
                         if (mzfBlocks.Count > 1)
                         {
@@ -649,7 +720,7 @@ namespace QDTool
                         TapeDocumentWriter.SaveMzf(filePath, mzfBlocks[0], preserve, generateSidecar);
                         SetCurrentDocumentAfterSave(filePath, TapeDocumentFormat.Mzf, GetExistingSidecarPath(filePath));
                     }
-                    else if (fileExtension == ".mzt")
+                    else if (outputFormat == TapeDocumentFormat.Mzt)
                     {
                         if (!TryChooseTapeSaveOptions(
                             filePath,
@@ -886,6 +957,12 @@ namespace QDTool
                     format = TapeDocumentFormat.Qdf;
                     recordsToAdd.AddRange(new QDFFileReader().ReadFile(filePath)
                         .Select(block => TapeRecord.FromLegacy(block.Item1, block.Item2)));
+                }
+                else if (fileExtension == ".qd")
+                {
+                    QdReadResult result = QdImageReaderWriter.ReadFile(filePath);
+                    format = result.DocumentFormat;
+                    recordsToAdd.AddRange(result.Records);
                 }
                 else if (fileExtension == ".mzf")
                 {

@@ -8,6 +8,7 @@ You can also reorder, add or delete files. Drag&Drop is supported. For example, 
 ### Currently QDTool supports following file types:
 **QDF** - Japan QuickDisk file format created for emulators, supported by EmuZ-1500, QDC, VirtuaQD tools.  
 **MZQ** - European QuickDisk file format with simpler structure without gaps, suppoted by Unicard for SHARP MZ-700/800/1500 and SHARP MZ emulators from Zdenek Adler, Michal Hucik, Bohumil Novacek, etc.  
+**QD** - Content-detected Sharp/MZ legacy logical images and physical HxC (`HXCQDDRV`) or FlashFloppy QuickDisk images. Save As offers each QD container variant explicitly.
 **MZF** - Tape file conatining header and data, as on tape, supported by most SHARP MZ emulators, UniCMT and others, the extension for the same file type is sometimes also M12 or MZT.  
 **MZT** - Multiple MZF tape files concatenated one after the other as on tape, supported by MZ700Win, UniCMT.  
 **LEP** - Export to a compact signed pulse-duration stream with 50 microsecond resolution.
@@ -21,15 +22,12 @@ All waveform profiles use 11000 SHORT pulses for a header leader and 5500 SHORT 
 ### There is work in progress on support for the following file types:
 **RAW** - Raw data grabbed from QuickDisk by QDC.  
 **MFM** - MFM data converted from RAW by QDC.  
-**QD** - HxC emulator QuickDisk file format.  
-**QD** - Michal Franzen emulator QuickDisk file format.  
-**QD** - VirtuaQD tools QuickDisk file format.  
 
 ### Requirements
 QDTool is a Windows WPF application and requires the .NET 10 Desktop Runtime to run. It is written in C# in Microsoft Visual Studio 2022.
 
 ### Basic and Advanced modes
-QDTool starts in Basic mode. Basic keeps the original simple QDF/MZQ/MZT/MZF workflow and hides waveform formats, tape profiles, sidecar metadata and trailing-data controls. Basic MZF saves omit trailing bytes; MZT saves always omit per-record trailing bytes.
+QDTool starts in Basic mode. Basic keeps the simple QDF/MZQ/QD/MZT/MZF workflow and hides waveform formats, tape profiles, sidecar metadata and trailing-data controls. Basic MZF saves omit trailing bytes; MZT saves always omit per-record trailing bytes.
 
 Enable **Enable advanced features** to show LEP/L16/WAV export and per-record **Loader** and **Speed** dropdown columns. Select multiple rows with Ctrl/Shift and changing either dropdown applies that complete, valid loader/speed profile to every selected record. The MZ-700/MZ-800 choice in the waveform save dialog is only the fallback for records without an explicit profile; an assigned row profile always wins. For multiple records, the same dialog offers **Union** (one output containing every record) or **Separate** (numbered output files, one per record). Switching modes changes only the interface and never changes loaded data.
 

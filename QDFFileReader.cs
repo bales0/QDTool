@@ -244,37 +244,19 @@ namespace QDTool
 
         public List<(MZQFileHeader, MZQFileBody)> ReadFile(string filePath)
         {
-            List<(MZQFileHeader, MZQFileBody)> mzfBlocks = new List<(MZQFileHeader, MZQFileBody)>();
-
-            using (FileStream fs = new FileStream(filePath, FileMode.Open, FileAccess.Read))
-            using (BinaryReader reader = new BinaryReader(fs))
+            byte[] image = File.ReadAllBytes(filePath);
+            byte[] expectedHeaderBytes = Encoding.ASCII.GetBytes("-QD format-")
+                .Concat(Enumerable.Repeat((byte)0xFF, 5)).ToArray();
+            if (image.Length < expectedHeaderBytes.Length ||
+                !image.AsSpan(0, expectedHeaderBytes.Length).SequenceEqual(expectedHeaderBytes))
             {
-                // Read the file header
-                MZQHeader header = ReadQDFHeader(reader);
-
-                if (!ValidateQDFHeader(header))
-                {
-                    throw new InvalidOperationException("Neplatný QDFHeader");
-                }
-
-                if (header.FileBlocksCount % 2 != 0)
-                {
-                    throw new InvalidDataException("Invalid QDF block count: header and body blocks must form pairs.");
-                }
-
-                //// Read each MZF block
-                int fileCount = header.FileBlocksCount / 2;
-                for (int i = 0; i < fileCount; i++)
-                {
-                    var mzfBlock = ReadQDFMzfBlock(reader);
-                    mzfBlocks.Add(mzfBlock);
-                }
-
-                currentPosition = fs.Position;
-                totalLength = fs.Length;
-                bytesRemaining = totalLength - currentPosition;
+                throw new InvalidDataException("Invalid QDF container header.");
             }
 
+            List<(MZQFileHeader, MZQFileBody)> mzfBlocks = SharpQdFrameCodec.DecodeByteStream(image);
+            currentPosition = image.Length;
+            totalLength = image.Length;
+            bytesRemaining = 0;
             return mzfBlocks;
         }
 
@@ -288,25 +270,13 @@ namespace QDTool
 
         public void WriteQDFHeaderToFile(FileStream fileStream, byte fbCount)
         {
-            // BinaryWriter writer = new BinaryWriter(fileStream);
-
             byte[] QDFFileSignature = Encoding.ASCII.GetBytes("-QD format-")
                 .Concat(Enumerable.Repeat((byte)0xFF, 5)).ToArray();
             fileStream.Write(QDFFileSignature, 0, QDFFileSignature.Length);
 
             WriteBytesToStream(fileStream, 0x00, 0x12EA - 16);
             WriteBytesToStream(fileStream, 0x16, 9);
-            fileStream.WriteByte(0xA5);
-            CRC_check(0xA5, true);
-
-            fileStream.WriteByte(fbCount);
-            ushort crc = CRC_check(fbCount);
-
-            byte crcHi = ReverseBits((byte)(crc & 0xFF));  // reverse bits and swap hi-lo bytes too
-            byte crcLo = ReverseBits((byte)(crc >> 8));
-            ushort calculatedCRC = (ushort)(crcLo + (crcHi << 8));
-            fileStream.WriteByte(crcLo);
-            fileStream.WriteByte(crcHi);
+            fileStream.Write(SharpQdFrameCodec.EncodeCountFrame(fbCount));
 
             WriteBytesToStream(fileStream, 0x16, 6);
             WriteBytesToStream(fileStream, 0x00, 2794);
@@ -318,45 +288,7 @@ namespace QDTool
         public void WriteQDFFileHeaderToFile(FileStream fileStream, MZQFileHeader mzfHeader)
         {
             WriteBytesToStream(fileStream, 0x16, 10);
-            fileStream.WriteByte(0xA5);
-            CRC_check(0xA5, true);
-
-            fileStream.WriteByte(mzfHeader.MzfHeaderSign);
-            CRC_check(mzfHeader.MzfHeaderSign);
-
-            var dataSizeBytes = BitConverter.GetBytes(mzfHeader.DataSize);
-            fileStream.Write(dataSizeBytes, 0, dataSizeBytes.Length);
-            CRC_check(dataSizeBytes, 0, dataSizeBytes.Length);
-
-            fileStream.WriteByte(mzfHeader.MzfFtype);
-            CRC_check(mzfHeader.MzfFtype);
-            fileStream.Write(mzfHeader.MzfFname, 0, mzfHeader.MzfFname.Length);
-            CRC_check(mzfHeader.MzfFname, 0, mzfHeader.MzfFname.Length);
-            fileStream.WriteByte(mzfHeader.MzfFnameEnd);
-            CRC_check(mzfHeader.MzfFnameEnd);
-            fileStream.Write(mzfHeader.Unused1, 0, mzfHeader.Unused1.Length);
-            CRC_check(mzfHeader.Unused1, 0, mzfHeader.Unused1.Length);
-
-            var mzfSizeBytes = BitConverter.GetBytes(mzfHeader.MzfSize);
-            fileStream.Write(mzfSizeBytes, 0, mzfSizeBytes.Length);
-            CRC_check(mzfSizeBytes, 0, mzfSizeBytes.Length);
-
-            var mzfStartBytes = BitConverter.GetBytes(mzfHeader.MzfStart);
-            fileStream.Write(mzfStartBytes, 0, mzfStartBytes.Length);
-            CRC_check(mzfStartBytes, 0, mzfStartBytes.Length);
-
-            var mzfExecBytes = BitConverter.GetBytes(mzfHeader.MzfExec);
-            fileStream.Write(mzfExecBytes, 0, mzfExecBytes.Length);
-            CRC_check(mzfExecBytes, 0, mzfExecBytes.Length);
-
-            fileStream.Write(mzfHeader.MzfHeaderDescription, 0, 38); // mzfHeader.MzfHeaderDescription.Length
-            ushort crc = CRC_check(mzfHeader.MzfHeaderDescription, 0, 38);
-
-            byte crcHi = ReverseBits((byte)(crc & 0xFF));  // reverse bits and swap hi-lo bytes too
-            byte crcLo = ReverseBits((byte)(crc >> 8));
-            ushort calculatedCRC = (ushort)(crcLo + (crcHi << 8));
-            fileStream.WriteByte(crcLo);
-            fileStream.WriteByte(crcHi);
+            fileStream.Write(SharpQdFrameCodec.EncodeHeaderFrame(mzfHeader));
 
             WriteBytesToStream(fileStream, 0x16, 7);
             WriteBytesToStream(fileStream, 0x00, 254);
@@ -365,24 +297,7 @@ namespace QDTool
         public void WriteQDFFileBodyToFile(FileStream fileStream, MZQFileBody mzfBody)
         {
             WriteBytesToStream(fileStream, 0x16, 10);
-            fileStream.WriteByte(0xA5);
-            CRC_check(0xA5, true);
-
-            fileStream.WriteByte(mzfBody.MzfBodySign);
-            CRC_check(mzfBody.MzfBodySign);
-
-            var dataSizeBytes = BitConverter.GetBytes(mzfBody.DataSize);
-            fileStream.Write(dataSizeBytes, 0, dataSizeBytes.Length);
-            CRC_check(dataSizeBytes, 0, dataSizeBytes.Length);
-
-            fileStream.Write(mzfBody.MzfBody, 0, mzfBody.DataSize);
-            ushort crc = CRC_check(mzfBody.MzfBody, 0, mzfBody.DataSize);
-
-            byte crcHi = ReverseBits((byte)(crc & 0xFF));  // reverse bits and swap hi-lo bytes too
-            byte crcLo = ReverseBits((byte)(crc >> 8));
-            ushort calculatedCRC = (ushort)(crcLo + (crcHi << 8));
-            fileStream.WriteByte(crcLo);
-            fileStream.WriteByte(crcHi);
+            fileStream.Write(SharpQdFrameCodec.EncodeBodyFrame(mzfBody));
 
             WriteBytesToStream(fileStream, 0x16, 7);
             WriteBytesToStream(fileStream, 0x00, 256);

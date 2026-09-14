@@ -38,7 +38,10 @@ namespace QDTool
         Mzf,
         Mzt,
         Mzq,
-        Qdf
+        Qdf,
+        QdSharpLegacy,
+        QdHxc,
+        QdFlashFloppy
     }
 
     internal sealed class TapeRecord

@@ -20,6 +20,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Update="QD\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="MZF\**\*.mzf" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Using Include="Xunit" />
   </ItemGroup>
 
