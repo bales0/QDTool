@@ -78,6 +78,9 @@ public class MzfDisplayData
     public string MzfStartHex { get; set; } = string.Empty;
     public string MzfExecHex { get; set; } = string.Empty;
     public string MzfHeaderDescription { get; set; } = string.Empty;
+    public string TrailingData { get; set; } = string.Empty;
+    public string Profile { get; set; } = string.Empty;
+    public string MetadataOrigin { get; set; } = string.Empty;
 }
 
 namespace QDTool
@@ -99,8 +102,10 @@ namespace QDTool
             "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
         };
 
-        List<(MZQFileHeader, MZQFileBody)> mzfBlocks = new List<(MZQFileHeader, MZQFileBody)>();
-        string actFileName = string.Empty;
+        private readonly TapeDocument document = new();
+        private List<TapeRecord> mzfBlocks => document.Records;
+        private string actFileName = string.Empty;
+        private bool AdvancedFeaturesEnabled => advancedFeaturesCheckBox.IsChecked == true;
 
         public ObservableCollection<MzfDisplayData> MzfDisplayDataCollection { get; set; }
 
@@ -118,10 +123,12 @@ namespace QDTool
             deleteButton.IsEnabled = false;
             clearAllButton.IsEnabled = false;
             saveButton.IsEnabled = false;
+            editProfileButton.IsEnabled = false;
+            ApplyFeatureMode();
         }
 
         private static bool TryValidateBlock(
-            (MZQFileHeader Header, MZQFileBody Body) block,
+            TapeRecord block,
             int index,
             out string error)
         {
@@ -186,7 +193,7 @@ namespace QDTool
 
             if (extension == ".qdf")
             {
-                long requiredSize = QdfHeaderSize + mzfBlocks.Sum(block => QdfFileOverhead + block.Item2.DataSize);
+                long requiredSize = QdfHeaderSize + mzfBlocks.Sum(block => QdfFileOverhead + block.Body.DataSize);
                 if (requiredSize > QdfImageSize)
                 {
                     error = $"The selected files need {requiredSize} bytes, but a QDF image can contain only {QdfImageSize} bytes.";
@@ -242,6 +249,13 @@ namespace QDTool
             }
         }
 
+        private SharpTapeMachine GetSelectedTapeMachine()
+        {
+            return tapeProfileComboBox.SelectedIndex == 1
+                ? SharpTapeMachine.Mz700
+                : SharpTapeMachine.Mz800;
+        }
+
         private void Window_DragEnter(object sender, DragEventArgs e)
         {
             if (e.Data.GetDataPresent(DataFormats.FileDrop))
@@ -258,16 +272,13 @@ namespace QDTool
 
                 if (files != null && files.Length > 0)
                 {
+                    bool bindAsCurrent = mzfBlocks.Count == 0;
                     foreach (var file in files)
                     {
-                        AddFile(file);
-                    }
-
-                    if (this.Title == "QDTool")
-                    {
-                        string fileName = System.IO.Path.GetFileName(files[0]); // s prvniho souboru vezmeme title, pokud neni nic nacteno
-                        this.Title = $"QDTool - {fileName}";
-                        actFileName = fileName;
+                        if (AddFile(file, bindAsCurrent))
+                        {
+                            bindAsCurrent = false;
+                        }
                     }
                     saveButton.IsEnabled = true;
                     exportAllButton.IsEnabled = true;
@@ -276,11 +287,11 @@ namespace QDTool
                 }
             }
         }
-        private void LoadDataToGrid(List<(MZQFileHeader, MZQFileBody)> mzfBlocks)
+        private void LoadDataToGrid(IEnumerable<TapeRecord> records)
         {
-            foreach (var block in mzfBlocks)
+            foreach (TapeRecord record in records)
             {
-                var header = block.Item1;
+                MZQFileHeader header = record.Header;
                 var displayData = new MzfDisplayData
                 {
                     MzfFtypeName = ConvertFtypeToDescription(header.MzfFtype),
@@ -288,7 +299,10 @@ namespace QDTool
                     MzfSize = header.MzfSize,
                     MzfStartHex = $"0x{header.MzfStart:X4}",
                     MzfExecHex = $"0x{header.MzfExec:X4}",
-                    MzfHeaderDescription = ConvertMzfNameToASCIIString(header.MzfHeaderDescription)
+                    MzfHeaderDescription = ConvertMzfNameToASCIIString(record.DescriptionRaw),
+                    TrailingData = $"{record.Body.TrailingData?.Length ?? 0} B",
+                    Profile = TapeProfileNames.ToDisplayName(record.Profile),
+                    MetadataOrigin = record.MetadataOrigin.ToString()
                 };
                 MzfDisplayDataCollection.Add(displayData);
             }
@@ -298,59 +312,125 @@ namespace QDTool
         {
             long declaredSize = 0;
             long trailingSize = 0;
+            long containerTrailingSize = document.ContainerTrailingData.Length;
             long sizeOnQDF = QdfHeaderSize;
             long sizeOnMZQ = 8;
 
-            foreach (var block in mzfBlocks)
+            foreach (TapeRecord record in mzfBlocks)
             {
-                MZQFileBody body = block.Item2;
+                MZQFileBody body = record.Body;
                 declaredSize += body.DataSize;
                 trailingSize += body.TrailingData?.Length ?? 0;
                 sizeOnQDF += QdfFileOverhead + body.DataSize;
                 sizeOnMZQ += 84 + body.DataSize;
             }
 
-            bool truncate = truncateCheckBox.IsChecked == true;
-            long occupiedSize = declaredSize + (truncate ? 0 : trailingSize);
-            string trailingInfo = trailingSize > 0 && !truncate
-                ? $" ({declaredSize} declared + {trailingSize} trailing)"
+            long occupiedSize = declaredSize + (AdvancedFeaturesEnabled ? trailingSize + containerTrailingSize : 0);
+            string trailingInfo = AdvancedFeaturesEnabled && (trailingSize > 0 || containerTrailingSize > 0)
+                ? $" ({declaredSize} declared + {trailingSize} record trailing + {containerTrailingSize} container trailing)"
                 : string.Empty;
             infoText.Content = $"Total {mzfBlocks.Count} files occupy {occupiedSize} bytes{trailingInfo}, est. {(float)sizeOnQDF / 819.36:F0}% of QDF or {(float)sizeOnMZQ / 614.71:F0}% of MZQ.";
-            truncateCheckBox.IsEnabled = trailingSize > 0;
-            truncateCheckBox.ToolTip = trailingSize > 0
-                ? $"Remove {trailingSize} bytes beyond the declared MZF sizes from all subsequent saves and exports."
-                : "No trailing MZF/MZT data to remove.";
-
-            if (trailingSize == 0)
-            {
-                truncateCheckBox.IsChecked = false;
-            }
         }
 
-        private void TruncateCheckBox_Changed(object sender, RoutedEventArgs e)
+        private void AdvancedFeaturesCheckBox_Changed(object sender, RoutedEventArgs e)
         {
             if (IsLoaded)
             {
+                ApplyFeatureMode();
                 UpdateStatus();
             }
+        }
+
+        private void ApplyFeatureMode()
+        {
+            Visibility advancedVisibility = AdvancedFeaturesEnabled ? Visibility.Visible : Visibility.Collapsed;
+            tapeProfileLabel.Visibility = advancedVisibility;
+            tapeProfileComboBox.Visibility = advancedVisibility;
+            trailingColumn.Visibility = advancedVisibility;
+            profileColumn.Visibility = advancedVisibility;
+            metadataOriginColumn.Visibility = advancedVisibility;
+            editProfileButton.Visibility = advancedVisibility;
+            UpdateAdvancedActionState();
+        }
+
+        private void UpdateAdvancedActionState()
+        {
+            int selectedIndex = MzfDataGrid.SelectedIndex;
+            editProfileButton.IsEnabled = AdvancedFeaturesEnabled &&
+                selectedIndex >= 0 && selectedIndex < mzfBlocks.Count;
+
+        }
+
+        private bool TryChooseTapeSaveOptions(
+            string mainPath,
+            TapeDocumentFormat format,
+            int trailingBytes,
+            out bool preserveTrailing,
+            out bool generateSidecar)
+        {
+            preserveTrailing = false;
+            generateSidecar = false;
+            if (!AdvancedFeaturesEnabled)
+            {
+                return true;
+            }
+
+            string sidecarPath = SidecarService.GetSidecarPath(mainPath);
+            var dialog = new TapeSaveOptionsDialog(
+                format,
+                trailingBytes,
+                sidecarAlreadyExists: File.Exists(sidecarPath))
+            {
+                Owner = this
+            };
+            if (dialog.ShowDialog() != true)
+            {
+                return false;
+            }
+
+            preserveTrailing = dialog.PreserveTrailing;
+            generateSidecar = dialog.GenerateSidecar;
+            return true;
+        }
+
+        private string GetOpenFilter() => FeatureModePolicy.OpenFilter;
+
+        private string GetSaveFilter() => FeatureModePolicy.GetSaveFilter(AdvancedFeaturesEnabled);
+
+        private string GetExportFilter() => FeatureModePolicy.GetExportFilter(AdvancedFeaturesEnabled);
+
+        private bool TryChoosePreserveTrailing(
+            IEnumerable<TapeRecord> records,
+            out bool preserveTrailing)
+        {
+            preserveTrailing = false;
+            int trailingBytes = records.Sum(record => record.Body.TrailingData?.Length ?? 0);
+            if (!AdvancedFeaturesEnabled || trailingBytes == 0)
+            {
+                return true;
+            }
+
+            MessageBoxResult result = MessageBox.Show(
+                $"Preserve {trailingBytes} trailing bytes in the standalone MZF output?",
+                "Preserve trailing data",
+                MessageBoxButton.YesNoCancel,
+                MessageBoxImage.Question);
+            preserveTrailing = result == MessageBoxResult.Yes;
+            return result != MessageBoxResult.Cancel;
         }
 
         private void button_Click_Open(object sender, RoutedEventArgs e)
         {
             OpenFileDialog openFileDialog = new OpenFileDialog();
-            openFileDialog.Filter = "All tape/QD files |*.mzt;*.mzf;*.mzq;*.qdf|Quickdisk file (*.mzq)|*.mzq|Multiple files tape (*.mzt)|*.mzt|Single tape file (*.mzf)|*.mzf|Quickdisk file (*.qdf)|*.qdf|All files(*.*)|*.*";
+            openFileDialog.Filter = GetOpenFilter();
 
             if (openFileDialog.ShowDialog() == true)
             {
-                mzfBlocks.Clear();
-
-                // string currentDirectory = Directory.GetCurrentDirectory();
                 string filePath = openFileDialog.FileName;
-                AddFile(filePath);
-
-                string fileName = System.IO.Path.GetFileName(filePath);
-                this.Title = $"QDTool - {fileName}";
-                actFileName = fileName;
+                if (!AddFile(filePath, bindAsCurrent: true))
+                {
+                    return;
+                }
 
                 exportAllButton.IsEnabled = true;
                 clearAllButton.IsEnabled = true;
@@ -369,7 +449,7 @@ namespace QDTool
             }
 
             SaveFileDialog saveFileDialog = new SaveFileDialog();
-            saveFileDialog.Filter = "Quickdisk file (*.qdf)|*.qdf|Quickdisk file (*.mzq)|*.mzq|Multiple files tape (*.mzt)|*.mzt|Single tape file (*.mzf)|*.mzf|All files(*.*)|*.*";
+            saveFileDialog.Filter = GetSaveFilter();
             string filenameWithoutExtension = System.IO.Path.GetFileNameWithoutExtension(actFileName);
             saveFileDialog.FileName = filenameWithoutExtension;
             string extension = System.IO.Path.GetExtension(actFileName).ToLower();
@@ -399,64 +479,123 @@ namespace QDTool
                     return;
                 }
 
-                if (fileExtension == ".mzq")
+                try
                 {
-                    using (var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write))
-                    {
-                        MZQFileReader mzqf = new MZQFileReader();
-                        mzqf.WriteMZQHeaderToFile(fileStream, checked((byte)(mzfBlocks.Count * 2)));
-                        foreach (var (header, body) in mzfBlocks)
-                        {
-                            mzqf.WriteMZQFileHeaderToFile(fileStream, header);
-                            mzqf.WriteMZQFileBodyToFile(fileStream, body);
-                        }
-                    }
-                }
-                else if (fileExtension == ".qdf")
-                {
-                    using (var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write))
-                    {
-                        QDFFileReader qdfr = new QDFFileReader();
-                        qdfr.WriteQDFHeaderToFile(fileStream, checked((byte)(mzfBlocks.Count * 2)));
-                        foreach (var (header, body) in mzfBlocks)
-                        {
-                            qdfr.WriteQDFFileHeaderToFile(fileStream, header);
-                            qdfr.WriteQDFFileBodyToFile(fileStream, body);
-                        }
-                        long currentSize = fileStream.Length; // Aktuální velikost streamu
-                        long bytesToWrite = QdfImageSize - currentSize; // Počet bytů, které je třeba doplnit
-                        qdfr.WriteBytesToStream(fileStream, 0x00, bytesToWrite);
-                    }
-                }
-                else if (fileExtension == ".mzt" || fileExtension == ".mzf")
-                {
-                    if (fileExtension == ".mzf" && mzfBlocks.Count > 1)
-                    {
-                        MessageBox.Show("MZF file should contain only one tape file. Please use Export button or Save as MZT file.", "MZF file limitation", MessageBoxButton.OK, MessageBoxImage.Warning);
-                    }
-                    else
+                    if (fileExtension == ".mzq")
                     {
                         using (var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write))
                         {
-                            MZTFileReader mztfr = new MZTFileReader();
-                            foreach (var (header, body) in mzfBlocks)
+                            MZQFileReader mzqf = new MZQFileReader();
+                            mzqf.WriteMZQHeaderToFile(fileStream, checked((byte)(mzfBlocks.Count * 2)));
+                            foreach (TapeRecord record in mzfBlocks)
                             {
-                                mztfr.WriteMZFFileHeaderToFile(fileStream, header);
-                                mztfr.WriteMZFFileBodyToFile(fileStream, body);
-                            }
-
-                            if (truncateCheckBox.IsChecked != true)
-                            {
-                                mztfr.WriteMZFTrailingDataToFile(fileStream, mzfBlocks[^1].Item2);
+                                mzqf.WriteMZQFileHeaderToFile(fileStream, record.Header);
+                                mzqf.WriteMZQFileBodyToFile(fileStream, record.Body);
                             }
                         }
+                        DiscardMetadataNotStoredByCurrentFormat();
+                        SetCurrentDocumentAfterSave(filePath, TapeDocumentFormat.Mzq, sidecarPath: null);
+                    }
+                    else if (fileExtension == ".qdf")
+                    {
+                        using (var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write))
+                        {
+                            QDFFileReader qdfr = new QDFFileReader();
+                            qdfr.WriteQDFHeaderToFile(fileStream, checked((byte)(mzfBlocks.Count * 2)));
+                            foreach (TapeRecord record in mzfBlocks)
+                            {
+                                qdfr.WriteQDFFileHeaderToFile(fileStream, record.Header);
+                                qdfr.WriteQDFFileBodyToFile(fileStream, record.Body);
+                            }
+                            long currentSize = fileStream.Length;
+                            long bytesToWrite = QdfImageSize - currentSize;
+                            qdfr.WriteBytesToStream(fileStream, 0x00, bytesToWrite);
+                        }
+                        DiscardMetadataNotStoredByCurrentFormat();
+                        SetCurrentDocumentAfterSave(filePath, TapeDocumentFormat.Qdf, sidecarPath: null);
+                    }
+                    else if (fileExtension == ".mzf")
+                    {
+                        if (mzfBlocks.Count > 1)
+                        {
+                            MessageBox.Show("MZF file should contain only one tape file. Please use Export button or Save as MZT file.", "MZF file limitation", MessageBoxButton.OK, MessageBoxImage.Warning);
+                            return;
+                        }
+                        int trailingBytes = mzfBlocks[0].Body.TrailingData?.Length ?? 0;
+                        if (!TryChooseTapeSaveOptions(
+                            filePath,
+                            TapeDocumentFormat.Mzf,
+                            trailingBytes,
+                            out bool preserve,
+                            out bool generateSidecar))
+                        {
+                            return;
+                        }
+                        TapeDocumentWriter.SaveMzf(filePath, mzfBlocks[0], preserve, generateSidecar);
+                        SetCurrentDocumentAfterSave(filePath, TapeDocumentFormat.Mzf, GetExistingSidecarPath(filePath));
+                    }
+                    else if (fileExtension == ".mzt")
+                    {
+                        if (!TryChooseTapeSaveOptions(
+                            filePath,
+                            TapeDocumentFormat.Mzt,
+                            trailingBytes: 0,
+                            out _,
+                            out bool generateSidecar))
+                        {
+                            return;
+                        }
+                        TapeDocumentWriter.SaveMzt(filePath, mzfBlocks, generateSidecar);
+                        document.ContainerTrailingData = Array.Empty<byte>();
+                        SetCurrentDocumentAfterSave(filePath, TapeDocumentFormat.Mzt, GetExistingSidecarPath(filePath));
+                    }
+                    else if (AdvancedFeaturesEnabled && (fileExtension == ".lep" || fileExtension == ".l16" || fileExtension == ".wav"))
+                    {
+                        SharpTapeExporter.Export(
+                            filePath,
+                            mzfBlocks,
+                            SharpTapeExporter.GetFormat(fileExtension),
+                            GetSelectedTapeMachine());
+                    }
+                    else
+                    {
+                        MessageBox.Show($"I do not know how to save file with extension {fileExtension} (yet).", "Unknown file extension", MessageBoxButton.OK, MessageBoxImage.Error);
                     }
                 }
-                else
+                catch (Exception ex)
                 {
-                    MessageBox.Show($"I do not know how to save file with extension {fileExtension} (yet).", "Unknown file extension", MessageBoxButton.OK, MessageBoxImage.Error);
+                    MessageBox.Show(ex.Message, "Error saving file", MessageBoxButton.OK, MessageBoxImage.Error);
                 }
             }
+        }
+
+        private static string? GetExistingSidecarPath(string filePath)
+        {
+            string sidecar = SidecarService.GetSidecarPath(filePath);
+            return File.Exists(sidecar) ? sidecar : null;
+        }
+
+        private void SetCurrentDocumentAfterSave(
+            string filePath,
+            TapeDocumentFormat format,
+            string? sidecarPath)
+        {
+            document.FilePath = System.IO.Path.GetFullPath(filePath);
+            document.Format = format;
+            document.SidecarPath = sidecarPath;
+            actFileName = System.IO.Path.GetFileName(filePath);
+            Title = $"QDTool - {actFileName}";
+            RefreshGrid();
+        }
+
+        private void DiscardMetadataNotStoredByCurrentFormat()
+        {
+            foreach (TapeRecord record in mzfBlocks)
+            {
+                record.RemoveTrailingData();
+                record.ResetMetadataToImplicit();
+            }
+            document.ContainerTrailingData = Array.Empty<byte>();
         }
 
         private void button_Click_View(object sender, RoutedEventArgs e)
@@ -467,9 +606,8 @@ namespace QDTool
 
             if (selectedIndex >= 0 && selectedIndex < mzfBlocks.Count)
             {
-                var selectedPair = mzfBlocks[selectedIndex];
-
-                hexBrowserWindow.ShowHexDump(selectedPair);
+                TapeRecord selectedRecord = mzfBlocks[selectedIndex];
+                hexBrowserWindow.ShowHexDump(selectedRecord, AdvancedFeaturesEnabled);
             }
 
             hexBrowserWindow.ShowDialog(); // Zobrazí HexBrowser jako modální dialogové okno
@@ -485,6 +623,39 @@ namespace QDTool
             int selectedIndex = MzfDataGrid.SelectedIndex;
             moveUpButton.IsEnabled = selectedIndex > 0 && mzfBlocks.Count > 1;
             moveDownButton.IsEnabled = selectedIndex < mzfBlocks.Count - 1 && selectedIndex >= 0;
+            UpdateAdvancedActionState();
+        }
+
+        private void button_Click_EditProfile(object sender, RoutedEventArgs e)
+        {
+            int selectedIndex = MzfDataGrid.SelectedIndex;
+            if (!AdvancedFeaturesEnabled || selectedIndex < 0 || selectedIndex >= mzfBlocks.Count)
+            {
+                return;
+            }
+
+            TapeRecord selectedRecord = mzfBlocks[selectedIndex];
+            string recordName = ConvertMzfNameToASCIIString(selectedRecord.Header.MzfFname);
+            var dialog = new ProfileEditorDialog(recordName, selectedRecord.Profile, mzfBlocks.Count > 1)
+            {
+                Owner = this
+            };
+            if (dialog.ShowDialog() != true)
+            {
+                return;
+            }
+
+            IEnumerable<TapeRecord> records = dialog.ApplyToAll
+                ? mzfBlocks
+                : new[] { selectedRecord };
+            foreach (TapeRecord record in records)
+            {
+                record.Profile = dialog.SelectedProfile;
+                record.MetadataOrigin = MetadataOrigin.CreatedOrModifiedInAdvanced;
+            }
+
+            RefreshGrid();
+            MzfDataGrid.SelectedIndex = selectedIndex;
         }
 
         private void button_Click_Up(object sender, RoutedEventArgs e)
@@ -499,8 +670,7 @@ namespace QDTool
                 //MzfDataGrid.ItemsSource = null;
                 //MzfDataGrid.ItemsSource = mzfBlocks;
 
-                MzfDisplayDataCollection.Clear();
-                LoadDataToGrid(mzfBlocks);
+                RefreshGrid();
 
                 MzfDataGrid.SelectedIndex = selectedIndex - 1;
                 MzfDataGrid.Focus();
@@ -519,8 +689,7 @@ namespace QDTool
                 //MzfDataGrid.ItemsSource = null;
                 //MzfDataGrid.ItemsSource = mzfBlocks;
 
-                MzfDisplayDataCollection.Clear();
-                LoadDataToGrid(mzfBlocks);
+                RefreshGrid();
 
                 //var currentSource = MzfDataGrid.ItemsSource;
                 //MzfDataGrid.ItemsSource = null;
@@ -531,93 +700,88 @@ namespace QDTool
             }
         }
 
-        private void AddFile(string filePath)
+        private bool AddFile(string filePath, bool bindAsCurrent = false)
         {
-            List<(MZQFileHeader, MZQFileBody)> mzfBlocksToAdd = new List<(MZQFileHeader, MZQFileBody)>();
+            string fileExtension = System.IO.Path.GetExtension(filePath).ToLowerInvariant();
+            var recordsToAdd = new List<TapeRecord>();
+            byte[] containerTrailing = Array.Empty<byte>();
+            string? loadedSidecar = null;
+            TapeDocumentFormat format;
 
-            string fileExtension = System.IO.Path.GetExtension(filePath).ToLower();
-
-            if (fileExtension == ".mzq")
+            try
             {
-                //mzfBlocks.Clear();
-                MzfDisplayDataCollection.Clear();
-
-                try
+                if (fileExtension == ".mzq")
                 {
-                    MZQFileReader qdfr = new MZQFileReader();
-                    mzfBlocksToAdd = qdfr.ReadFile(filePath);
-                    mzfBlocks.AddRange(mzfBlocksToAdd);
+                    format = TapeDocumentFormat.Mzq;
+                    recordsToAdd.AddRange(new MZQFileReader().ReadFile(filePath)
+                        .Select(block => TapeRecord.FromLegacy(block.Item1, block.Item2)));
                 }
-                catch (Exception ex)
+                else if (fileExtension == ".qdf")
                 {
-                    MessageBox.Show(ex.Message, "Error reading file", MessageBoxButton.OK, MessageBoxImage.Error);
+                    format = TapeDocumentFormat.Qdf;
+                    recordsToAdd.AddRange(new QDFFileReader().ReadFile(filePath)
+                        .Select(block => TapeRecord.FromLegacy(block.Item1, block.Item2)));
+                }
+                else if (fileExtension == ".mzf")
+                {
+                    format = TapeDocumentFormat.Mzf;
+                    TapeRecord record = new MZTFileReader().ReadStandaloneMzf(filePath);
+                    loadedSidecar = SidecarService.LoadForMzf(filePath, record);
+                    recordsToAdd.Add(record);
+                }
+                else if (fileExtension == ".mzt")
+                {
+                    format = TapeDocumentFormat.Mzt;
+                    MztReadResult result = new MZTFileReader().ReadMzt(filePath);
+                    recordsToAdd.AddRange(result.Records);
+                    containerTrailing = result.ContainerTrailingData;
+                    loadedSidecar = SidecarService.LoadForMzt(filePath, recordsToAdd);
+                }
+                else
+                {
+                    MessageBox.Show($"I do not know how to process file with extension {fileExtension} (yet).", "Unknown file extension", MessageBoxButton.OK, MessageBoxImage.Error);
+                    return false;
                 }
 
-                LoadDataToGrid(mzfBlocks);
-
+                if (bindAsCurrent)
+                {
+                    document.Clear();
+                    document.FilePath = System.IO.Path.GetFullPath(filePath);
+                    document.Format = format;
+                    document.ContainerTrailingData = containerTrailing;
+                    document.SidecarPath = loadedSidecar;
+                    actFileName = System.IO.Path.GetFileName(filePath);
+                    Title = $"QDTool - {actFileName}";
+                }
+                mzfBlocks.AddRange(recordsToAdd);
+                RefreshGrid();
+                return true;
             }
-            else if (fileExtension == ".qdf")
+            catch (Exception ex)
             {
-                //mzfBlocks.Clear();
-                MzfDisplayDataCollection.Clear();
-
-                try
-                {
-                    QDFFileReader qdfr = new QDFFileReader();
-                    mzfBlocksToAdd = qdfr.ReadFile(filePath);
-                    mzfBlocks.AddRange(mzfBlocksToAdd);
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show(ex.Message, "Error reading file", MessageBoxButton.OK, MessageBoxImage.Error);
-                }
-
-
-                LoadDataToGrid(mzfBlocks);
-
+                MessageBox.Show(ex.Message, "Error reading file", MessageBoxButton.OK, MessageBoxImage.Error);
+                return false;
             }
-            else if (fileExtension == ".mzt" || fileExtension == ".mzf")
-            {
-                //mzfBlocks.Clear();
-                MzfDisplayDataCollection.Clear();
+        }
 
-                try
-                {
-                    MZTFileReader mztfr = new MZTFileReader();
-                    mzfBlocksToAdd = mztfr.ReadMztFile(filePath);
-                    mzfBlocks.AddRange(mzfBlocksToAdd);
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show(ex.Message, "Error reading file", MessageBoxButton.OK, MessageBoxImage.Error);
-                }
-
-                LoadDataToGrid(mzfBlocks);
-            }
-            else
-            {
-                MessageBox.Show($"I do not know how to process file with extension {fileExtension} (yet).", "Unknown file extension", MessageBoxButton.OK, MessageBoxImage.Error);
-            }
-
+        private void RefreshGrid()
+        {
+            MzfDisplayDataCollection.Clear();
+            LoadDataToGrid(mzfBlocks);
+            UpdateStatus();
+            UpdateAdvancedActionState();
         }
 
         private void button_Click_Add(object sender, RoutedEventArgs e)
         {
             OpenFileDialog openFileDialog = new OpenFileDialog();
-            openFileDialog.Filter = "Quickdisk file (*.mzq)|*.mzq|Multiple files tape (*.mzt)|*.mzt|Single tape file (*.mzf)|*.mzf|Quickdisk file (*.qdf)|*.qdf|All files(*.*)|*.*";
+            openFileDialog.Filter = GetOpenFilter();
 
             if (openFileDialog.ShowDialog() == true)
             {
                 // string currentDirectory = Directory.GetCurrentDirectory();
                 string filePath = openFileDialog.FileName;
-                AddFile(filePath);
-
-                if (this.Title == "QDTool")
-                {
-                    string fileName = System.IO.Path.GetFileName(filePath);
-                    this.Title = $"QDTool - {fileName}";
-                    actFileName = fileName;
-                }
+                AddFile(filePath, bindAsCurrent: mzfBlocks.Count == 0);
 
                 saveButton.IsEnabled = true;
                 exportAllButton.IsEnabled = true;
@@ -632,7 +796,7 @@ namespace QDTool
 
             if (selectedIndex >= 0 && selectedIndex < mzfBlocks.Count)
             {
-                var item = mzfBlocks[selectedIndex];
+                TapeRecord item = mzfBlocks[selectedIndex];
 
                 if (!TryValidateBlock(item, selectedIndex, out string validationError))
                 {
@@ -641,24 +805,48 @@ namespace QDTool
                 }
 
                 SaveFileDialog saveFileDialog = new SaveFileDialog();
-                saveFileDialog.Filter = "Single tape file (*.mzf)|*.mzf";
-                MZQFileHeader header = item.Item1;
-                MZQFileBody body = item.Item2;
+                saveFileDialog.Filter = GetExportFilter();
+                saveFileDialog.AddExtension = true;
+                saveFileDialog.DefaultExt = ".mzf";
+                MZQFileHeader header = item.Header;
+                MZQFileBody body = item.Body;
                 saveFileDialog.FileName = ConvertMzfNameToASCIIString(header.MzfFname);
 
                 if (saveFileDialog.ShowDialog() == true)
                 {
                     string filePath = saveFileDialog.FileName;
 
-                    using (var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write))
+                    string fileExtension = System.IO.Path.GetExtension(filePath).ToLowerInvariant();
+                    if (fileExtension == ".mzf")
                     {
-                        MZTFileReader mztfr = new MZTFileReader();
-                        mztfr.WriteMZFFileHeaderToFile(fileStream, header);
-                        mztfr.WriteMZFFileBodyToFile(fileStream, body);
-                        if (truncateCheckBox.IsChecked != true)
+                        TapeRecord exportRecord = item.DeepClone();
+                        int trailingBytes = item.Body.TrailingData?.Length ?? 0;
+                        if (!TryChooseTapeSaveOptions(
+                            filePath,
+                            TapeDocumentFormat.Mzf,
+                            trailingBytes,
+                            out bool preserve,
+                            out bool generateSidecar))
                         {
-                            mztfr.WriteMZFTrailingDataToFile(fileStream, body);
+                            return;
                         }
+                        TapeDocumentWriter.SaveMzf(filePath, exportRecord, preserve, generateSidecar);
+                    }
+                    else if (AdvancedFeaturesEnabled && (fileExtension == ".lep" || fileExtension == ".l16" || fileExtension == ".wav"))
+                    {
+                        SharpTapeExporter.Export(
+                            filePath,
+                            new[] { (header, body) },
+                            SharpTapeExporter.GetFormat(fileExtension),
+                            GetSelectedTapeMachine());
+                    }
+                    else
+                    {
+                        MessageBox.Show(
+                            $"I do not know how to export a file with extension {fileExtension}.",
+                            "Unknown file extension",
+                            MessageBoxButton.OK,
+                            MessageBoxImage.Error);
                     }
                 }
             }
@@ -691,7 +879,8 @@ namespace QDTool
                     bool firstPass = true;
                     int blocks = -1;
 
-                    mzfBlocks = qdfr.ReadFile(filePath);
+                    mzfBlocks.AddRange(qdfr.ReadFile(filePath)
+                        .Select(block => TapeRecord.FromLegacy(block.Item1, block.Item2)));
 
                     using (StreamWriter writer = new StreamWriter(outFilePath, append: true))
                     {
@@ -769,10 +958,7 @@ namespace QDTool
             {
                 mzfBlocks.RemoveAt(selectedIndex);
 
-                MzfDisplayDataCollection.Clear();
-                LoadDataToGrid(mzfBlocks);
-
-                UpdateStatus();
+                RefreshGrid();
 
                 //MzfDataGrid.SelectedIndex = selectedIndex - 1;
                 //MzfDataGrid.Focus();
@@ -808,20 +994,15 @@ namespace QDTool
                 else
                 {
                     HashSet<string> reservedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                    foreach (var (header, body) in mzfBlocks)
+                    if (!TryChoosePreserveTrailing(mzfBlocks, out bool preserve))
                     {
-                        string fileName = ConvertMzfNameToASCIIString(header.MzfFname);
+                        return;
+                    }
+                    foreach (TapeRecord record in mzfBlocks)
+                    {
+                        string fileName = ConvertMzfNameToASCIIString(record.Header.MzfFname);
                         string filePath = GetAvailableExportPath(exportPath, fileName, reservedPaths);
-                        using (var fileStream = new FileStream(filePath, FileMode.CreateNew, FileAccess.Write))
-                        {
-                            MZTFileReader mztfr = new MZTFileReader();
-                            mztfr.WriteMZFFileHeaderToFile(fileStream, header);
-                            mztfr.WriteMZFFileBodyToFile(fileStream, body);
-                            if (truncateCheckBox.IsChecked != true)
-                            {
-                                mztfr.WriteMZFTrailingDataToFile(fileStream, body);
-                            }
-                        }
+                        TapeDocumentWriter.SaveMzf(filePath, record.DeepClone(), preserve);
                     }
                 }
             }
@@ -829,11 +1010,13 @@ namespace QDTool
 
         private void button_Click_ClearAll(object sender, RoutedEventArgs e)
         {
-            mzfBlocks.Clear();
+            document.Clear();
             MzfDisplayDataCollection.Clear();
             exportAllButton.IsEnabled = false;
-            LoadDataToGrid(mzfBlocks);
+            Title = "QDTool";
+            actFileName = string.Empty;
             UpdateStatus();
+            UpdateAdvancedActionState();
         }
 
         private void button_Click_About(object sender, RoutedEventArgs e)

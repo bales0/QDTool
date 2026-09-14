@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
@@ -24,6 +25,12 @@ namespace QDTool
         public AboutDialog()
         {
             InitializeComponent();
+            string version = Assembly.GetExecutingAssembly()
+                .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?
+                .InformationalVersion.Split('+')[0]
+                ?? Assembly.GetExecutingAssembly().GetName().Version?.ToString()
+                ?? "unknown";
+            versionTextBlock.Text = $"Version {version}";
         }
 
         private void OkButton_Click(object sender, RoutedEventArgs e)

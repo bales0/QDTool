@@ -1,135 +1,174 @@
-﻿using System;
+using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Runtime.InteropServices;
-using System.Security.RightsManagement;
-using System.Text;
-using System.Threading.Tasks;
 using static QDTool.Utility;
 
 namespace QDTool
 {
+    internal sealed class MztReadResult
+    {
+        public List<TapeRecord> Records { get; } = new();
+        public byte[] ContainerTrailingData { get; set; } = Array.Empty<byte>();
+    }
+
     internal class MZTFileReader
     {
-        private const int MzfBlockAlignment = 128;
+        public long currentPosition;
+        public long totalLength;
+        public long bytesRemaining;
 
-        public long currentPosition = 0;
-        public long totalLength = 0;
-        public long bytesRemaining = 0;
-
-        public List<(MZQFileHeader, MZQFileBody)> ReadMztFile(string filePath)
+        public TapeRecord ReadStandaloneMzf(string filePath)
         {
-            List<(MZQFileHeader, MZQFileBody)> mzfBlocks = new List<(MZQFileHeader, MZQFileBody)>();
-
-            using (FileStream fs = new FileStream(filePath, FileMode.Open, FileAccess.Read))
-            using (BinaryReader reader = new BinaryReader(fs))
+            using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            using var reader = new BinaryReader(stream);
+            TapeRecord record = ReadMzfRecord(reader);
+            int trailingLength = checked((int)(stream.Length - stream.Position));
+            if (trailingLength > 0)
             {
-                // Read each MZF File
-                while (reader.BaseStream.Length - reader.BaseStream.Position >= MzfBlockAlignment)
-                {
-                    var mzfBlock = ReadMzfFile(reader);
-                    mzfBlocks.Add(mzfBlock);
-                }
+                MZQFileBody body = record.Body;
+                body.TrailingData = ReadBytesExact(reader, trailingLength, "MZF trailing data");
+                record.Body = body;
+            }
+            SetPosition(stream);
+            return record;
+        }
 
-                long trailingBytes = reader.BaseStream.Length - reader.BaseStream.Position;
-                if (mzfBlocks.Count == 0 && trailingBytes > 0)
-                {
-                    throw new InvalidDataException(
-                        $"Incomplete MZF header: expected {MzfBlockAlignment} bytes, only {trailingBytes} remain.");
-                }
+        public MztReadResult ReadMzt(string filePath)
+        {
+            using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            using var reader = new BinaryReader(stream);
+            var result = new MztReadResult();
 
-                if (trailingBytes > 0 && reader.BaseStream.Length % MzfBlockAlignment != 0)
+            while (stream.Position < stream.Length)
+            {
+                long recordStart = stream.Position;
+                if (!TryReadMzfRecord(reader, out TapeRecord? record))
                 {
-                    throw new InvalidDataException(
-                        $"Unexpected {trailingBytes} trailing bytes after the last MZF file.");
+                    stream.Position = recordStart;
+                    int trailingLength = checked((int)(stream.Length - stream.Position));
+                    result.ContainerTrailingData = ReadBytesExact(reader, trailingLength, "MZT container trailing data");
+                    break;
                 }
-
-                if (trailingBytes > 0)
-                {
-                    byte[] trailingData = ReadBytesExact(reader, (int)trailingBytes, "MZF trailing data");
-                    var (header, body) = mzfBlocks[^1];
-                    body.TrailingData = trailingData;
-                    mzfBlocks[^1] = (header, body);
-                }
-
-                currentPosition = fs.Position;
-                totalLength = fs.Length;
-                bytesRemaining = totalLength - currentPosition;
+                result.Records.Add(record!);
             }
 
-            return mzfBlocks;
+            if (result.Records.Count == 0)
+            {
+                throw new InvalidDataException("The MZT does not contain a complete, structurally valid MZF record.");
+            }
+            SetPosition(stream);
+            return result;
         }
 
+        public bool TryReadMzfRecord(BinaryReader reader, out TapeRecord? record)
+        {
+            record = null;
+            Stream stream = reader.BaseStream;
+            long start = stream.Position;
+            if (stream.Length - start < TapeRecord.HeaderLength)
+            {
+                return false;
+            }
+
+            byte[] rawHeader = reader.ReadBytes(TapeRecord.HeaderLength);
+            ushort bodyLength = BinaryPrimitives.ReadUInt16LittleEndian(rawHeader.AsSpan(18, 2));
+            bool acceptableHeader = IsStructurallyAcceptableHeader(rawHeader);
+            if (!acceptableHeader || stream.Length - stream.Position < bodyLength)
+            {
+                stream.Position = start;
+                return false;
+            }
+
+            byte[] bodyBytes = reader.ReadBytes(bodyLength);
+            record = CreateRecord(rawHeader, bodyBytes);
+            return true;
+        }
+
+        private static bool IsStructurallyAcceptableHeader(ReadOnlySpan<byte> rawHeader)
+        {
+            // MZF has no magic signature. A short name normally ends with CR in
+            // byte 17, while several real tools write NUL when all 16 filename
+            // bytes are occupied. Requiring CR rejected otherwise valid records.
+            // File type zero is not a defined MZF type and keeps zero-filled or
+            // alignment tails from being mistaken for another record.
+            return rawHeader[0] != 0 && (rawHeader[17] == 0x0D || rawHeader[17] == 0x00);
+        }
+
+        public TapeRecord ReadMzfRecord(BinaryReader reader)
+        {
+            long available = reader.BaseStream.Length - reader.BaseStream.Position;
+            if (available < TapeRecord.HeaderLength)
+            {
+                throw new InvalidDataException(
+                    $"Incomplete MZF header: expected {TapeRecord.HeaderLength} bytes, only {available} remain.");
+            }
+
+            byte[] rawHeader = ReadBytesExact(reader, TapeRecord.HeaderLength, "MZF header");
+            ushort bodyLength = BinaryPrimitives.ReadUInt16LittleEndian(rawHeader.AsSpan(18, 2));
+            byte[] body = ReadBytesExact(reader, bodyLength, "MZF file body");
+            return CreateRecord(rawHeader, body);
+        }
+
+        // Compatibility entry points retained for QD/MZQ code and older tests.
         public (MZQFileHeader, MZQFileBody) ReadMzfFile(BinaryReader reader)
         {
-
-            MZQFileHeader header = new MZQFileHeader();
-
-            // Načtení jednotlivých členů struktury
-            header.StartSign = ExpectedStartSign.ToArray(); // zadny tu neni, ale vyplnime
-            header.MzfHeaderSign = 0x00;
-            header.DataSize = 0x0040; // (ushort)(header.MzfSize + 128); // ma vyznam asi jen u MZQ - ??? - aaa
-            header.MzfFtype = reader.ReadByte();
-            header.MzfFname = ReadBytesExact(reader, 16, "MZF file name");
-            header.MzfFnameEnd = reader.ReadByte();
-            header.Unused1 = ExpectedUnused.ToArray(); // zadny tu neni, ale vyplnime
-            header.MzfSize = reader.ReadUInt16();
-            header.MzfStart = reader.ReadUInt16();
-            header.MzfExec = reader.ReadUInt16();
-
-            // Načtení celych 104 bajtů pro MzfHeaderDescription
-            header.MzfHeaderDescription = new byte[104]; // Inicializace pole 104 bajty
-            byte[] descriptionBytes = ReadBytesExact(reader, 104, "MZF header description");
-            Array.Copy(descriptionBytes, header.MzfHeaderDescription, descriptionBytes.Length);
-
-            // Načtení CRC
-            header.Crc = ExpectedCrc.ToArray(); // zadny tu neni, ale vyplnime
-
-            // Načtení zbytku MZF Těla
-            MZQFileBody body = new MZQFileBody
-            {
-                StartSign = ExpectedStartSign.ToArray(),
-                MzfBodySign = 0x05,
-                DataSize = header.MzfSize, // ??? - aaa
-                MzfBody = ReadBytesExact(reader, header.MzfSize, "MZF file body"),
-                Crc = ExpectedCrc.ToArray(),
-                TrailingData = Array.Empty<byte>()
-            };
-
-            return (header, body);
+            TapeRecord record = ReadMzfRecord(reader);
+            return (record.Header, record.Body);
         }
 
-        public void WriteMZFFileHeaderToFile(FileStream fileStream, MZQFileHeader mzfHeader)
-        {
-            fileStream.WriteByte(mzfHeader.MzfFtype);
-            fileStream.Write(mzfHeader.MzfFname, 0, mzfHeader.MzfFname.Length);
-            fileStream.WriteByte(mzfHeader.MzfFnameEnd);
+        public List<(MZQFileHeader, MZQFileBody)> ReadMztFile(string filePath) =>
+            ReadMzt(filePath).Records.Select(record => (record.Header, record.Body)).ToList();
 
-            var mzfSizeBytes = BitConverter.GetBytes(mzfHeader.MzfSize);
-            fileStream.Write(mzfSizeBytes, 0, mzfSizeBytes.Length);
+        public void WriteMZFFileHeaderToFile(FileStream fileStream, MZQFileHeader mzfHeader) =>
+            fileStream.Write(TapeRecord.FromLegacy(mzfHeader, default).GetSerializedHeader());
 
-            var mzfStartBytes = BitConverter.GetBytes(mzfHeader.MzfStart);
-            fileStream.Write(mzfStartBytes, 0, mzfStartBytes.Length);
-
-            var mzfExecBytes = BitConverter.GetBytes(mzfHeader.MzfExec);
-            fileStream.Write(mzfExecBytes, 0, mzfExecBytes.Length);
-
-            fileStream.Write(mzfHeader.MzfHeaderDescription, 0, 104);
-        }
-
-        public void WriteMZFFileBodyToFile(FileStream fileStream, MZQFileBody mzfBody)
-        {
+        public void WriteMZFFileBodyToFile(FileStream fileStream, MZQFileBody mzfBody) =>
             fileStream.Write(mzfBody.MzfBody, 0, mzfBody.DataSize);
-        }
 
         public void WriteMZFTrailingDataToFile(FileStream fileStream, MZQFileBody mzfBody)
         {
             if (mzfBody.TrailingData is { Length: > 0 })
             {
-                fileStream.Write(mzfBody.TrailingData, 0, mzfBody.TrailingData.Length);
+                fileStream.Write(mzfBody.TrailingData);
             }
         }
 
+        private static TapeRecord CreateRecord(byte[] rawHeader, byte[] bodyBytes)
+        {
+            var header = new MZQFileHeader
+            {
+                StartSign = ExpectedStartSign.ToArray(),
+                MzfHeaderSign = 0,
+                DataSize = 0x0040,
+                MzfFtype = rawHeader[0],
+                MzfFname = rawHeader[1..17],
+                MzfFnameEnd = rawHeader[17],
+                Unused1 = ExpectedUnused.ToArray(),
+                MzfSize = BinaryPrimitives.ReadUInt16LittleEndian(rawHeader.AsSpan(18, 2)),
+                MzfStart = BinaryPrimitives.ReadUInt16LittleEndian(rawHeader.AsSpan(20, 2)),
+                MzfExec = BinaryPrimitives.ReadUInt16LittleEndian(rawHeader.AsSpan(22, 2)),
+                MzfHeaderDescription = rawHeader[24..128],
+                Crc = ExpectedCrc.ToArray()
+            };
+            var body = new MZQFileBody
+            {
+                StartSign = ExpectedStartSign.ToArray(),
+                MzfBodySign = 0x05,
+                DataSize = header.MzfSize,
+                MzfBody = bodyBytes,
+                Crc = ExpectedCrc.ToArray(),
+                TrailingData = Array.Empty<byte>()
+            };
+            return new TapeRecord(rawHeader, header, body);
+        }
+
+        private void SetPosition(Stream stream)
+        {
+            currentPosition = stream.Position;
+            totalLength = stream.Length;
+            bytesRemaining = totalLength - currentPosition;
+        }
     }
 }

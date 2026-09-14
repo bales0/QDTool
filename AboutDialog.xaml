@@ -8,7 +8,7 @@
         Title="About" Height="175" Width="300">
     <StackPanel Margin="10">
         <TextBlock FontWeight="Bold" FontSize="14"><Run Language="cs-cz" Text="QDTool"/></TextBlock>
-        <TextBlock><Run Text="V"/><Run Text="ersion"/><Run Text=" "/><Run Text="0"/><Run Text=".2"/><Run Text=".0"/><Run Text=" alpha (13 September 2026)"/></TextBlock>
+        <TextBlock x:Name="versionTextBlock"/>
         <TextBlock><Run Text="© 2026 "/><Run Text="Martin Lukasek"/></TextBlock>
         <TextBlock><Run Language="cs-cz" Text="Simple app to convert SHARP MZ files."/></TextBlock>
         <TextBlock>

@@ -25,7 +25,7 @@ namespace QDTool
             new SolidColorBrush(Color.FromRgb(0x99, 0x99, 0x99));
 
         private const string TrailingDataToolTip =
-            "Data beyond the size declared in the MZF header. Select Truncate before Save As to remove it.";
+            "Data beyond the size declared in the MZF header. Clear Preserve trailing data before Save As to remove it.";
 
         public HexBrowser()
         {
@@ -106,7 +106,10 @@ namespace QDTool
             contentPanel.Children.Add(dumpBlock);
         }
 
-        private void AddFileDataSection(byte[] declaredData, byte[] trailingData)
+        private void AddFileDataSection(
+            byte[] declaredData,
+            byte[] trailingData,
+            bool showTrailingSummary)
         {
             TextBlock headingBlock = CreateDumpTextBlock(
                 "ADDRESS   FILE DATA                                           ASCII             SHASCII (EU)");
@@ -123,16 +126,18 @@ namespace QDTool
                 contentPanel.Children.Add(CreateFileDataLine(allData, offset, declaredData.Length));
             }
 
-            if (trailingData.Length > 0)
+            if (showTrailingSummary)
             {
                 TextBlock legend = CreateDumpTextBlock();
                 legend.Margin = new Thickness(0, 4, 0, 0);
                 legend.Inlines.Add(new Run($"Declared size: {declaredData.Length} bytes. "));
-                legend.Inlines.Add(new Run($"Trailing data: {trailingData.Length} bytes.")
+                Run trailingSummary = new Run($"Trailing data: {trailingData.Length} bytes.");
+                if (trailingData.Length > 0)
                 {
-                    Foreground = TrailingDataForeground,
-                    ToolTip = TrailingDataToolTip
-                });
+                    trailingSummary.Foreground = TrailingDataForeground;
+                    trailingSummary.ToolTip = TrailingDataToolTip;
+                }
+                legend.Inlines.Add(trailingSummary);
                 contentPanel.Children.Add(legend);
             }
         }
@@ -284,22 +289,14 @@ namespace QDTool
             };
         }
 
-        public void ShowHexDump((MZQFileHeader, MZQFileBody) MzfBlock)
+        internal void ShowHexDump(TapeRecord record, bool advancedFeaturesEnabled)
         {
-            MZQFileHeader header = MzfBlock.Item1;
-            MZQFileBody body = MzfBlock.Item2;
-
-            byte[] mzfHeaderData = new byte[128];
-            mzfHeaderData[0] = header.MzfFtype;
-            Array.Copy(header.MzfFname, 0, mzfHeaderData, 1, header.MzfFname.Length);
-            mzfHeaderData[17] = header.MzfFnameEnd;
+            MZQFileHeader header = record.Header;
+            MZQFileBody body = record.Body;
+            byte[] mzfHeaderData = record.GetSerializedHeader();
             byte[] mzfSizeBytes = BitConverter.GetBytes(header.MzfSize);
-            Array.Copy(mzfSizeBytes, 0, mzfHeaderData, 18, mzfSizeBytes.Length);
             byte[] mzfStartBytes = BitConverter.GetBytes(header.MzfStart);
-            Array.Copy(mzfStartBytes, 0, mzfHeaderData, 20, mzfStartBytes.Length);
             byte[] mzfExecBytes = BitConverter.GetBytes(header.MzfExec);
-            Array.Copy(mzfExecBytes, 0, mzfHeaderData, 22, mzfExecBytes.Length);
-            Array.Copy(header.MzfHeaderDescription, 0, mzfHeaderData, 24, 104);
 
             byte[] qdfHeaderData = new byte[70];
             qdfHeaderData[0] = 0xA5;
@@ -332,8 +329,14 @@ namespace QDTool
             AddSection(
                 "ADDRESS   MZF HEADER DATA                                     ASCII             SHASCII (EU)",
                 mzfHeaderData);
-            AddQdfHeaderSection(qdfHeaderData);
-            AddFileDataSection(body.MzfBody, body.TrailingData ?? Array.Empty<byte>());
+            if (advancedFeaturesEnabled)
+            {
+                AddQdfHeaderSection(qdfHeaderData);
+            }
+            AddFileDataSection(
+                body.MzfBody,
+                advancedFeaturesEnabled ? body.TrailingData ?? Array.Empty<byte>() : Array.Empty<byte>(),
+                showTrailingSummary: advancedFeaturesEnabled);
         }
     }
 }
