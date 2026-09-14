@@ -49,7 +49,7 @@ namespace QDTool
         public static string ConvertMzfNameToASCIIString(byte[] bytes)
         {
             var convertedBytes = bytes.Select(b => FromSHASCII(b)).ToArray();
-            int endIndex = Array.IndexOf(convertedBytes, (byte)0x0D);
+            int endIndex = Array.FindIndex(convertedBytes, value => value is 0x00 or 0x0D);
             if (endIndex == -1)
             {
                 endIndex = convertedBytes.Length;

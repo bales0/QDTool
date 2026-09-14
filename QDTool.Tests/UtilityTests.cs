@@ -4,6 +4,15 @@ namespace QDTool.Tests;
 
 public class UtilityTests
 {
+    [Fact]
+    public void ConvertMzfNameToAsciiString_StopsAtNulPadding()
+    {
+        byte[] name = new byte[16];
+        "GAME"u8.CopyTo(name);
+
+        Assert.Equal("GAME", Utility.ConvertMzfNameToASCIIString(name));
+    }
+
     [Theory]
     [InlineData(0x00, 0x00)]
     [InlineData(0x01, 0x80)]

@@ -2,10 +2,12 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Reflection.PortableExecutable;
 using System.Runtime.InteropServices;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
@@ -66,8 +68,11 @@ public struct MZQFileBody
     public byte[] TrailingData; // optional MZF/MZT block-alignment bytes beyond the declared body size
 }
 
-public class MzfDisplayData
+public class MzfDisplayData : INotifyPropertyChanged
 {
+    private string loaderType = "NORMAL";
+    private string speed = "1:1";
+
     public string MzfFtypeName { get; set; } = string.Empty;
     public string MzfFname { get; set; } = string.Empty;
     public ushort MzfSize { get; set; }
@@ -79,8 +84,56 @@ public class MzfDisplayData
     public string MzfExecHex { get; set; } = string.Empty;
     public string MzfHeaderDescription { get; set; } = string.Empty;
     public string TrailingData { get; set; } = string.Empty;
-    public string Profile { get; set; } = string.Empty;
-    public string MetadataOrigin { get; set; } = string.Empty;
+
+    public IReadOnlyList<string> LoaderTypes => QDTool.TapeProfileComponents.LoaderTypes;
+
+    public string LoaderType
+    {
+        get => loaderType;
+        set
+        {
+            if (loaderType == value)
+            {
+                return;
+            }
+            loaderType = value;
+            speed = QDTool.TapeProfileComponents.NormalizeSpeed(loaderType, speed);
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(AvailableSpeeds));
+            OnPropertyChanged(nameof(Speed));
+        }
+    }
+
+    public IReadOnlyList<string> AvailableSpeeds =>
+        QDTool.TapeProfileComponents.GetAvailableSpeeds(loaderType);
+
+    public string Speed
+    {
+        get => speed;
+        set
+        {
+            string normalized = QDTool.TapeProfileComponents.NormalizeSpeed(loaderType, value);
+            if (speed == normalized)
+            {
+                return;
+            }
+            speed = normalized;
+            OnPropertyChanged();
+        }
+    }
+
+    internal void SetProfile(QDTool.TapeProfile profile)
+    {
+        (loaderType, speed) = QDTool.TapeProfileComponents.Split(profile);
+        OnPropertyChanged(nameof(LoaderType));
+        OnPropertyChanged(nameof(AvailableSpeeds));
+        OnPropertyChanged(nameof(Speed));
+    }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    private void OnPropertyChanged([CallerMemberName] string? propertyName = null) =>
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
 }
 
 namespace QDTool
@@ -105,6 +158,7 @@ namespace QDTool
         private readonly TapeDocument document = new();
         private List<TapeRecord> mzfBlocks => document.Records;
         private string actFileName = string.Empty;
+        private bool updatingProfileEditors;
         private bool AdvancedFeaturesEnabled => advancedFeaturesCheckBox.IsChecked == true;
 
         public ObservableCollection<MzfDisplayData> MzfDisplayDataCollection { get; set; }
@@ -123,7 +177,6 @@ namespace QDTool
             deleteButton.IsEnabled = false;
             clearAllButton.IsEnabled = false;
             saveButton.IsEnabled = false;
-            editProfileButton.IsEnabled = false;
             ApplyFeatureMode();
         }
 
@@ -249,13 +302,6 @@ namespace QDTool
             }
         }
 
-        private SharpTapeMachine GetSelectedTapeMachine()
-        {
-            return tapeProfileComboBox.SelectedIndex == 1
-                ? SharpTapeMachine.Mz700
-                : SharpTapeMachine.Mz800;
-        }
-
         private void Window_DragEnter(object sender, DragEventArgs e)
         {
             if (e.Data.GetDataPresent(DataFormats.FileDrop))
@@ -300,10 +346,9 @@ namespace QDTool
                     MzfStartHex = $"0x{header.MzfStart:X4}",
                     MzfExecHex = $"0x{header.MzfExec:X4}",
                     MzfHeaderDescription = ConvertMzfNameToASCIIString(record.DescriptionRaw),
-                    TrailingData = $"{record.Body.TrailingData?.Length ?? 0} B",
-                    Profile = TapeProfileNames.ToDisplayName(record.Profile),
-                    MetadataOrigin = record.MetadataOrigin.ToString()
+                    TrailingData = $"{record.Body.TrailingData?.Length ?? 0} B"
                 };
+                displayData.SetProfile(record.Profile);
                 MzfDisplayDataCollection.Add(displayData);
             }
         }
@@ -344,21 +389,9 @@ namespace QDTool
         private void ApplyFeatureMode()
         {
             Visibility advancedVisibility = AdvancedFeaturesEnabled ? Visibility.Visible : Visibility.Collapsed;
-            tapeProfileLabel.Visibility = advancedVisibility;
-            tapeProfileComboBox.Visibility = advancedVisibility;
             trailingColumn.Visibility = advancedVisibility;
-            profileColumn.Visibility = advancedVisibility;
-            metadataOriginColumn.Visibility = advancedVisibility;
-            editProfileButton.Visibility = advancedVisibility;
-            UpdateAdvancedActionState();
-        }
-
-        private void UpdateAdvancedActionState()
-        {
-            int selectedIndex = MzfDataGrid.SelectedIndex;
-            editProfileButton.IsEnabled = AdvancedFeaturesEnabled &&
-                selectedIndex >= 0 && selectedIndex < mzfBlocks.Count;
-
+            loaderColumn.Visibility = advancedVisibility;
+            speedColumn.Visibility = advancedVisibility;
         }
 
         private bool TryChooseTapeSaveOptions(
@@ -391,6 +424,88 @@ namespace QDTool
             preserveTrailing = dialog.PreserveTrailing;
             generateSidecar = dialog.GenerateSidecar;
             return true;
+        }
+
+        private bool TryChooseWaveformSaveOptions(
+            string extension,
+            int recordCount,
+            out SharpTapeMachine machine,
+            out bool separateFiles)
+        {
+            machine = SharpTapeMachine.Mz800;
+            separateFiles = false;
+            if (!AdvancedFeaturesEnabled)
+            {
+                return true;
+            }
+
+            var dialog = new WaveformSaveOptionsDialog(extension, recordCount)
+            {
+                Owner = this
+            };
+            if (dialog.ShowDialog() != true)
+            {
+                return false;
+            }
+
+            machine = dialog.SelectedMachine;
+            separateFiles = dialog.SeparateFiles;
+            return true;
+        }
+
+        private bool ExportWaveform(
+            string selectedPath,
+            IReadOnlyList<TapeRecord> records,
+            SharpTapeOutputFormat format,
+            SharpTapeMachine machine,
+            bool separateFiles)
+        {
+            try
+            {
+                if (!separateFiles || records.Count == 1)
+                {
+                    SharpTapeExporter.Export(selectedPath, records, format, machine);
+                    return true;
+                }
+
+                IReadOnlyList<string> outputPaths =
+                    SharpTapeExporter.GetSeparateOutputPaths(selectedPath, records);
+                string[] existingPaths = outputPaths.Where(File.Exists).ToArray();
+                bool overwrite = false;
+                if (existingPaths.Length > 0)
+                {
+                    MessageBoxResult result = MessageBox.Show(
+                        this,
+                        $"{existingPaths.Length} separate output file(s) already exist. Overwrite them?",
+                        "Overwrite separate files",
+                        MessageBoxButton.YesNo,
+                        MessageBoxImage.Warning);
+                    if (result != MessageBoxResult.Yes)
+                    {
+                        return false;
+                    }
+                    overwrite = true;
+                }
+
+                SharpTapeExporter.ExportSeparate(
+                    selectedPath,
+                    records,
+                    format,
+                    machine,
+                    overwrite);
+                MessageBox.Show(
+                    this,
+                    $"Created {outputPaths.Count} separate files in:\n{System.IO.Path.GetDirectoryName(outputPaths[0])}",
+                    "Separate export complete",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "Error saving tape output", MessageBoxButton.OK, MessageBoxImage.Error);
+                return false;
+            }
         }
 
         private string GetOpenFilter() => FeatureModePolicy.OpenFilter;
@@ -551,11 +666,20 @@ namespace QDTool
                     }
                     else if (AdvancedFeaturesEnabled && (fileExtension == ".lep" || fileExtension == ".l16" || fileExtension == ".wav"))
                     {
-                        SharpTapeExporter.Export(
+                        if (!TryChooseWaveformSaveOptions(
+                            fileExtension,
+                            mzfBlocks.Count,
+                            out SharpTapeMachine machine,
+                            out bool separateFiles))
+                        {
+                            return;
+                        }
+                        ExportWaveform(
                             filePath,
                             mzfBlocks,
                             SharpTapeExporter.GetFormat(fileExtension),
-                            GetSelectedTapeMachine());
+                            machine,
+                            separateFiles);
                     }
                     else
                     {
@@ -623,39 +747,80 @@ namespace QDTool
             int selectedIndex = MzfDataGrid.SelectedIndex;
             moveUpButton.IsEnabled = selectedIndex > 0 && mzfBlocks.Count > 1;
             moveDownButton.IsEnabled = selectedIndex < mzfBlocks.Count - 1 && selectedIndex >= 0;
-            UpdateAdvancedActionState();
         }
 
-        private void button_Click_EditProfile(object sender, RoutedEventArgs e)
+        private void LoaderComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
-            int selectedIndex = MzfDataGrid.SelectedIndex;
-            if (!AdvancedFeaturesEnabled || selectedIndex < 0 || selectedIndex >= mzfBlocks.Count)
+            ApplyProfileFromComboBox(sender, loaderChanged: true);
+        }
+
+        private void SpeedComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            ApplyProfileFromComboBox(sender, loaderChanged: false);
+        }
+
+        private void ProfileComboBox_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            if (sender is ComboBox comboBox &&
+                comboBox.DataContext is MzfDisplayData displayData &&
+                MzfDataGrid.SelectedItems.Count > 1 &&
+                MzfDataGrid.SelectedItems.Contains(displayData))
+            {
+                // Keep an existing multi-selection while opening an editor in
+                // one of its rows; the DataGrid would otherwise collapse it.
+                e.Handled = true;
+                comboBox.Focus();
+                comboBox.IsDropDownOpen = true;
+            }
+        }
+
+        private void ApplyProfileFromComboBox(object sender, bool loaderChanged)
+        {
+            if (updatingProfileEditors || !AdvancedFeaturesEnabled ||
+                sender is not ComboBox comboBox ||
+                !comboBox.IsKeyboardFocusWithin ||
+                comboBox.DataContext is not MzfDisplayData source)
             {
                 return;
             }
 
-            TapeRecord selectedRecord = mzfBlocks[selectedIndex];
-            string recordName = ConvertMzfNameToASCIIString(selectedRecord.Header.MzfFname);
-            var dialog = new ProfileEditorDialog(recordName, selectedRecord.Profile, mzfBlocks.Count > 1)
+            string loaderType = loaderChanged
+                ? comboBox.SelectedItem as string ?? source.LoaderType
+                : source.LoaderType;
+            string speed = loaderChanged
+                ? TapeProfileComponents.NormalizeSpeed(loaderType, source.Speed)
+                : comboBox.SelectedItem as string ?? source.Speed;
+            TapeProfile profile = TapeProfileComponents.Combine(loaderType, speed);
+            List<MzfDisplayData> targets = MzfDataGrid.SelectedItems
+                .OfType<MzfDisplayData>()
+                .ToList();
+            if (!targets.Contains(source))
             {
-                Owner = this
-            };
-            if (dialog.ShowDialog() != true)
-            {
-                return;
+                targets.Clear();
+                targets.Add(source);
             }
 
-            IEnumerable<TapeRecord> records = dialog.ApplyToAll
-                ? mzfBlocks
-                : new[] { selectedRecord };
-            foreach (TapeRecord record in records)
+            updatingProfileEditors = true;
+            try
             {
-                record.Profile = dialog.SelectedProfile;
-                record.MetadataOrigin = MetadataOrigin.CreatedOrModifiedInAdvanced;
-            }
+                foreach (MzfDisplayData target in targets)
+                {
+                    int index = MzfDisplayDataCollection.IndexOf(target);
+                    if (index < 0 || index >= mzfBlocks.Count)
+                    {
+                        continue;
+                    }
 
-            RefreshGrid();
-            MzfDataGrid.SelectedIndex = selectedIndex;
+                    TapeRecord record = mzfBlocks[index];
+                    record.Profile = profile;
+                    record.MetadataOrigin = MetadataOrigin.CreatedOrModifiedInAdvanced;
+                    target.SetProfile(record.Profile);
+                }
+            }
+            finally
+            {
+                updatingProfileEditors = false;
+            }
         }
 
         private void button_Click_Up(object sender, RoutedEventArgs e)
@@ -769,7 +934,6 @@ namespace QDTool
             MzfDisplayDataCollection.Clear();
             LoadDataToGrid(mzfBlocks);
             UpdateStatus();
-            UpdateAdvancedActionState();
         }
 
         private void button_Click_Add(object sender, RoutedEventArgs e)
@@ -834,11 +998,20 @@ namespace QDTool
                     }
                     else if (AdvancedFeaturesEnabled && (fileExtension == ".lep" || fileExtension == ".l16" || fileExtension == ".wav"))
                     {
-                        SharpTapeExporter.Export(
+                        if (!TryChooseWaveformSaveOptions(
+                            fileExtension,
+                            recordCount: 1,
+                            out SharpTapeMachine machine,
+                            out bool separateFiles))
+                        {
+                            return;
+                        }
+                        ExportWaveform(
                             filePath,
-                            new[] { (header, body) },
+                            new[] { item },
                             SharpTapeExporter.GetFormat(fileExtension),
-                            GetSelectedTapeMachine());
+                            machine,
+                            separateFiles);
                     }
                     else
                     {
@@ -1016,7 +1189,6 @@ namespace QDTool
             Title = "QDTool";
             actFileName = string.Empty;
             UpdateStatus();
-            UpdateAdvancedActionState();
         }
 
         private void button_Click_About(object sender, RoutedEventArgs e)

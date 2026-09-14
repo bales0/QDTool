@@ -1,5 +1,4 @@
 using System;
-using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -23,35 +22,6 @@ namespace QDTool
     {
         private const int WavSampleRate = 44100;
 
-        // NORMAL 1:1 monitor profiles from MZ-SD2CMT2-Reborn.
-        private static readonly TapeProfile Mz800Profile = new(
-            ShortHighMicroseconds: 250,
-            ShortLowMicroseconds: 250,
-            LongHighMicroseconds: 500,
-            LongLowMicroseconds: 500,
-            HeaderLeaderPulses: 6344,
-            DataLeaderPulses: 6344,
-            HeaderMarkLongPulses: 40,
-            HeaderMarkShortPulses: 40,
-            DataMarkLongPulses: 20,
-            DataMarkShortPulses: 20,
-            FinalMarkLongPulses: 2,
-            TrailingLongPulses: 2);
-
-        private static readonly TapeProfile Mz700Profile = new(
-            ShortHighMicroseconds: 240,
-            ShortLowMicroseconds: 264,
-            LongHighMicroseconds: 464,
-            LongLowMicroseconds: 494,
-            HeaderLeaderPulses: 22000,
-            DataLeaderPulses: 11000,
-            HeaderMarkLongPulses: 40,
-            HeaderMarkShortPulses: 40,
-            DataMarkLongPulses: 20,
-            DataMarkShortPulses: 20,
-            FinalMarkLongPulses: 2,
-            TrailingLongPulses: 2);
-
         public static void Export(
             string filePath,
             IReadOnlyList<(MZQFileHeader Header, MZQFileBody Body)> blocks,
@@ -59,11 +29,71 @@ namespace QDTool
             SharpTapeMachine machine = SharpTapeMachine.Mz800)
         {
             ArgumentNullException.ThrowIfNull(blocks);
-            ExportCore(
-                filePath,
-                blocks.Select(block => (CreateMzfHeader(block.Header), block.Body.MzfBody)).ToList(),
-                format,
-                machine);
+            List<TapeRecord> records = blocks.Select(block =>
+            {
+                TapeRecord record = TapeRecord.FromLegacy(block.Header, block.Body);
+                record.Profile = machine == SharpTapeMachine.Mz700
+                    ? TapeProfile.Mz700_1_1
+                    : TapeProfile.Normal1_1;
+                record.MetadataOrigin = MetadataOrigin.CreatedOrModifiedInAdvanced;
+                return record;
+            }).ToList();
+            Export(filePath, records, format, machine);
+        }
+
+        public static IReadOnlyList<string> GetSeparateOutputPaths(
+            string selectedPath,
+            IReadOnlyList<TapeRecord> records)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(selectedPath);
+            ArgumentNullException.ThrowIfNull(records);
+            if (records.Count == 0)
+            {
+                throw new InvalidOperationException("There are no MZF files to export.");
+            }
+
+            string fullPath = Path.GetFullPath(selectedPath);
+            string directory = Path.GetDirectoryName(fullPath)
+                ?? throw new InvalidOperationException("The output path has no directory.");
+            string extension = Path.GetExtension(fullPath);
+            string baseName = Path.GetFileNameWithoutExtension(fullPath);
+            var result = new List<string>(records.Count);
+            for (int index = 0; index < records.Count; index++)
+            {
+                string recordName = Utility.ConvertMzfNameToASCIIString(records[index].Header.MzfFname);
+                string safeRecordName = SanitizeFilePart(recordName);
+                string fileName = $"{baseName}_{index + 1:D2}_{safeRecordName}{extension}";
+                result.Add(Path.Combine(directory, fileName));
+            }
+            return result;
+        }
+
+        public static IReadOnlyList<string> ExportSeparate(
+            string selectedPath,
+            IReadOnlyList<TapeRecord> records,
+            SharpTapeOutputFormat format,
+            SharpTapeMachine machine,
+            bool overwrite)
+        {
+            IReadOnlyList<string> paths = GetSeparateOutputPaths(selectedPath, records);
+            if (!overwrite)
+            {
+                string? existingPath = paths.FirstOrDefault(File.Exists);
+                if (existingPath != null)
+                {
+                    throw new IOException($"The separate output file already exists: {existingPath}");
+                }
+            }
+
+            for (int index = 0; index < records.Count; index++)
+            {
+                if (overwrite && File.Exists(paths[index]))
+                {
+                    File.Delete(paths[index]);
+                }
+                Export(paths[index], new[] { records[index] }, format, machine);
+            }
+            return paths;
         }
 
         public static void Export(
@@ -73,25 +103,18 @@ namespace QDTool
             SharpTapeMachine machine = SharpTapeMachine.Mz800)
         {
             ArgumentNullException.ThrowIfNull(records);
-            ExportCore(
-                filePath,
-                records.Select(record => (record.GetSerializedHeader(), record.Body.MzfBody)).ToList(),
-                format,
-                machine);
-        }
-
-        private static void ExportCore(
-            string filePath,
-            IReadOnlyList<(byte[] Header, byte[] Body)> blocks,
-            SharpTapeOutputFormat format,
-            SharpTapeMachine machine)
-        {
             ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
 
-            if (blocks.Count == 0)
+            if (records.Count == 0)
             {
                 throw new InvalidOperationException("There are no MZF files to export.");
             }
+
+            // Build every plan before creating the destination so an invalid
+            // loader cannot leave a truncated output file behind.
+            List<IReadOnlyList<SharpTapeStage>> plans = records
+                .Select(record => SharpTapeProfileEncoder.Build(record, machine))
+                .ToList();
 
             using FileStream fileStream = new FileStream(filePath, FileMode.Create, FileAccess.ReadWrite);
             using TapeSink sink = format switch
@@ -102,16 +125,12 @@ namespace QDTool
                 _ => throw new ArgumentOutOfRangeException(nameof(format))
             };
 
-            TapeProfile profile = machine switch
+            foreach (IReadOnlyList<SharpTapeStage> plan in plans)
             {
-                SharpTapeMachine.Mz800 => Mz800Profile,
-                SharpTapeMachine.Mz700 => Mz700Profile,
-                _ => throw new ArgumentOutOfRangeException(nameof(machine))
-            };
-
-            foreach (var (header, body) in blocks)
-            {
-                WriteConventionalRecord(sink, profile, header, body);
+                foreach (SharpTapeStage stage in plan)
+                {
+                    WriteStage(sink, stage);
+                }
             }
 
             sink.Complete();
@@ -128,77 +147,124 @@ namespace QDTool
             };
         }
 
-        private static void WriteConventionalRecord(
-            TapeSink sink,
-            TapeProfile profile,
-            byte[] header,
-            byte[] body)
+        private static string SanitizeFilePart(string value)
         {
+            value = value.Trim().TrimEnd('\0', '\r', '\n', '.');
+            char[] invalid = Path.GetInvalidFileNameChars();
+            string result = new string(value
+                .Select(character => invalid.Contains(character) ? '_' : character)
+                .ToArray())
+                .Trim()
+                .TrimEnd('.');
+            if (string.IsNullOrWhiteSpace(result))
+            {
+                return "unnamed";
+            }
+            return result.Length <= 64 ? result : result[..64];
+        }
+
+        private static void WriteStage(TapeSink sink, SharpTapeStage stage)
+        {
+            WriteDelay(sink, stage.InvertSignal, stage.DelayBeforeMilliseconds);
             WriteBlock(
                 sink,
-                profile,
-                header,
-                profile.HeaderLeaderPulses,
-                profile.HeaderMarkLongPulses,
-                profile.HeaderMarkShortPulses);
-            WriteBlock(
-                sink,
-                profile,
-                body,
-                profile.DataLeaderPulses,
-                profile.DataMarkLongPulses,
-                profile.DataMarkShortPulses);
+                stage.Pulses,
+                stage.Data,
+                stage.LeaderShortPulses,
+                stage.MarkLongPulses,
+                stage.MarkShortPulses,
+                stage.FinalMarkLongPulses,
+                stage.TrailingPulses,
+                stage.TrailingPulseIsLong,
+                stage.InvertSignal);
         }
 
         private static void WriteBlock(
             TapeSink sink,
-            TapeProfile profile,
+            SharpPulseProfile profile,
             byte[] data,
             int leaderPulses,
             int markLongPulses,
-            int markShortPulses)
+            int markShortPulses,
+            int finalMarkLongPulses,
+            int trailingPulses,
+            bool trailingPulseIsLong,
+            bool invertSignal)
         {
-            WritePulses(sink, profile, isLong: false, leaderPulses);
-            WritePulses(sink, profile, isLong: true, markLongPulses);
-            WritePulses(sink, profile, isLong: false, markShortPulses);
-            WritePulses(sink, profile, isLong: true, profile.FinalMarkLongPulses);
-            WriteData(sink, profile, data);
-            WriteChecksum(sink, profile, ComputeChecksum(data));
-            WritePulses(sink, profile, isLong: true, profile.TrailingLongPulses);
+            WritePulses(sink, profile, isLong: false, leaderPulses, invertSignal);
+            WritePulses(sink, profile, isLong: true, markLongPulses, invertSignal);
+            WritePulses(sink, profile, isLong: false, markShortPulses, invertSignal);
+            WritePulses(sink, profile, isLong: true, finalMarkLongPulses, invertSignal);
+            WriteData(sink, profile, data, invertSignal);
+            WriteChecksum(sink, profile, ComputeChecksum(data), invertSignal);
+            WritePulses(sink, profile, trailingPulseIsLong, trailingPulses, invertSignal);
         }
 
-        private static void WriteData(TapeSink sink, TapeProfile profile, byte[] data)
+        private static void WriteData(
+            TapeSink sink,
+            SharpPulseProfile profile,
+            byte[] data,
+            bool invertSignal)
         {
             foreach (byte value in data)
             {
                 for (int bit = 7; bit >= 0; bit--)
                 {
-                    WritePulse(sink, profile, (value & (1 << bit)) != 0);
+                    WritePulse(sink, profile, (value & (1 << bit)) != 0, invertSignal);
                 }
 
-                WritePulse(sink, profile, isLong: true);
+                WritePulse(sink, profile, isLong: true, invertSignal);
             }
         }
 
-        private static void WriteChecksum(TapeSink sink, TapeProfile profile, ushort checksum)
+        private static void WriteChecksum(
+            TapeSink sink,
+            SharpPulseProfile profile,
+            ushort checksum,
+            bool invertSignal)
         {
-            WriteData(sink, profile, new[] { (byte)(checksum >> 8), (byte)checksum });
+            WriteData(sink, profile, new[] { (byte)(checksum >> 8), (byte)checksum }, invertSignal);
         }
 
-        private static void WritePulses(TapeSink sink, TapeProfile profile, bool isLong, int count)
+        private static void WritePulses(
+            TapeSink sink,
+            SharpPulseProfile profile,
+            bool isLong,
+            int count,
+            bool invertSignal)
         {
             for (int i = 0; i < count; i++)
             {
-                WritePulse(sink, profile, isLong);
+                WritePulse(sink, profile, isLong, invertSignal);
             }
         }
 
-        private static void WritePulse(TapeSink sink, TapeProfile profile, bool isLong)
+        private static void WritePulse(
+            TapeSink sink,
+            SharpPulseProfile profile,
+            bool isLong,
+            bool invertSignal)
         {
-            int highDuration = isLong ? profile.LongHighMicroseconds : profile.ShortHighMicroseconds;
-            int lowDuration = isLong ? profile.LongLowMicroseconds : profile.ShortLowMicroseconds;
-            sink.WriteInterval(high: true, highDuration);
-            sink.WriteInterval(high: false, lowDuration);
+            double highDuration = isLong ? profile.LongHighMicroseconds : profile.ShortHighMicroseconds;
+            double lowDuration = isLong ? profile.LongLowMicroseconds : profile.ShortLowMicroseconds;
+            if (invertSignal)
+            {
+                sink.WriteInterval(high: false, lowDuration);
+                sink.WriteInterval(high: true, highDuration);
+            }
+            else
+            {
+                sink.WriteInterval(high: true, highDuration);
+                sink.WriteInterval(high: false, lowDuration);
+            }
+        }
+
+        private static void WriteDelay(TapeSink sink, bool invertSignal, int milliseconds)
+        {
+            for (int index = 0; index < milliseconds; index++)
+            {
+                sink.WriteInterval(high: invertSignal, durationMicroseconds: 1000);
+            }
         }
 
         private static ushort ComputeChecksum(byte[] data)
@@ -217,36 +283,9 @@ namespace QDTool
             return unchecked((ushort)checksum);
         }
 
-        private static byte[] CreateMzfHeader(MZQFileHeader header)
-        {
-            byte[] data = new byte[128];
-            data[0] = header.MzfFtype;
-            Array.Copy(header.MzfFname, 0, data, 1, 16);
-            data[17] = header.MzfFnameEnd;
-            BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(18, 2), header.MzfSize);
-            BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(20, 2), header.MzfStart);
-            BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(22, 2), header.MzfExec);
-            Array.Copy(header.MzfHeaderDescription, 0, data, 24, 104);
-            return data;
-        }
-
-        private readonly record struct TapeProfile(
-            int ShortHighMicroseconds,
-            int ShortLowMicroseconds,
-            int LongHighMicroseconds,
-            int LongLowMicroseconds,
-            int HeaderLeaderPulses,
-            int DataLeaderPulses,
-            int HeaderMarkLongPulses,
-            int HeaderMarkShortPulses,
-            int DataMarkLongPulses,
-            int DataMarkShortPulses,
-            int FinalMarkLongPulses,
-            int TrailingLongPulses);
-
         private abstract class TapeSink : IDisposable
         {
-            public abstract void WriteInterval(bool high, int durationMicroseconds);
+            public abstract void WriteInterval(bool high, double durationMicroseconds);
 
             public abstract void Complete();
 
@@ -265,7 +304,7 @@ namespace QDTool
                 this.unitMicroseconds = unitMicroseconds;
             }
 
-            public override void WriteInterval(bool high, int durationMicroseconds)
+            public override void WriteInterval(bool high, double durationMicroseconds)
             {
                 double exactUnits = ((double)durationMicroseconds / unitMicroseconds) + quantizationError;
                 int units = Math.Max(1, (int)Math.Round(exactUnits, MidpointRounding.AwayFromZero));
@@ -312,7 +351,7 @@ namespace QDTool
                 WriteHeader(dataSize: 0);
             }
 
-            public override void WriteInterval(bool high, int durationMicroseconds)
+            public override void WriteInterval(bool high, double durationMicroseconds)
             {
                 double exactSamples = ((double)durationMicroseconds * sampleRate / 1_000_000) + quantizationError;
                 int samples = Math.Max(1, (int)Math.Round(exactSamples, MidpointRounding.AwayFromZero));

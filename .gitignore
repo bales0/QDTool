@@ -9,9 +9,9 @@
 *.user
 *.userosscache
 *.sln.docstates
-.obj
-.specification
-.QDTool.Tests
+.obj/
+.specification/
+.QDTool.Tests/
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs

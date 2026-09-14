@@ -61,6 +61,187 @@ public class SharpTapeExporterTests
     [Theory]
     [InlineData(0)]
     [InlineData(1)]
+    [InlineData(2)]
+    public void Export_UsesExplicitPerRecordSpeed(int formatValue)
+    {
+        string normalPath = Path.Combine(Path.GetTempPath(), $"qdtool-{Guid.NewGuid():N}-normal.tmp");
+        string fastPath = Path.Combine(Path.GetTempPath(), $"qdtool-{Guid.NewGuid():N}-fast.tmp");
+        TapeRecord normal = CreateTestRecord(TapeProfile.Normal1_1);
+        TapeRecord fast = CreateTestRecord(TapeProfile.Normal1_2);
+        var format = (SharpTapeOutputFormat)formatValue;
+
+        try
+        {
+            SharpTapeExporter.Export(normalPath, [normal], format, SharpTapeMachine.Mz800);
+            SharpTapeExporter.Export(fastPath, [fast], format, SharpTapeMachine.Mz800);
+
+            Assert.NotEqual(File.ReadAllBytes(normalPath), File.ReadAllBytes(fastPath));
+            if (format == SharpTapeOutputFormat.Wav)
+            {
+                Assert.True(new FileInfo(fastPath).Length < new FileInfo(normalPath).Length);
+            }
+        }
+        finally
+        {
+            File.Delete(normalPath);
+            File.Delete(fastPath);
+        }
+    }
+
+    [Fact]
+    public void Export_DoesNotOverrideExplicitProfileWithDialogMachine()
+    {
+        string mz800Path = Path.Combine(Path.GetTempPath(), $"qdtool-{Guid.NewGuid():N}-mz800.l16");
+        string mz700Path = Path.Combine(Path.GetTempPath(), $"qdtool-{Guid.NewGuid():N}-mz700.l16");
+        TapeRecord record = CreateTestRecord(TapeProfile.Normal1_3);
+
+        try
+        {
+            SharpTapeExporter.Export(mz800Path, [record], SharpTapeOutputFormat.L16, SharpTapeMachine.Mz800);
+            SharpTapeExporter.Export(mz700Path, [record], SharpTapeOutputFormat.L16, SharpTapeMachine.Mz700);
+
+            Assert.Equal(File.ReadAllBytes(mz800Path), File.ReadAllBytes(mz700Path));
+        }
+        finally
+        {
+            File.Delete(mz800Path);
+            File.Delete(mz700Path);
+        }
+    }
+
+    [Fact]
+    public void UnionExport_UsesProfileOfEveryRecord()
+    {
+        string mixedPath = Path.Combine(Path.GetTempPath(), $"qdtool-{Guid.NewGuid():N}-mixed.l16");
+        string normalPath = Path.Combine(Path.GetTempPath(), $"qdtool-{Guid.NewGuid():N}-normal.l16");
+        TapeRecord first = CreateTestRecord(TapeProfile.Normal1_1);
+        TapeRecord fastSecond = CreateTestRecord(TapeProfile.Normal1_3);
+        TapeRecord normalSecond = CreateTestRecord(TapeProfile.Normal1_1);
+
+        try
+        {
+            SharpTapeExporter.Export(
+                mixedPath, [first, fastSecond], SharpTapeOutputFormat.L16, SharpTapeMachine.Mz800);
+            SharpTapeExporter.Export(
+                normalPath, [first, normalSecond], SharpTapeOutputFormat.L16, SharpTapeMachine.Mz800);
+
+            Assert.NotEqual(File.ReadAllBytes(normalPath), File.ReadAllBytes(mixedPath));
+        }
+        finally
+        {
+            File.Delete(mixedPath);
+            File.Delete(normalPath);
+        }
+    }
+
+    [Fact]
+    public void ProfileEncoder_GeneratesIcLoaderAndTurboBody()
+    {
+        TapeRecord record = CreateTestRecord(TapeProfile.Ic1_3);
+
+        IReadOnlyList<SharpTapeStage> stages =
+            SharpTapeProfileEncoder.Build(record, SharpTapeMachine.Mz800);
+
+        Assert.Equal(2, stages.Count);
+        Assert.Equal(0xBB, stages[0].Data[0]);
+        Assert.Equal(0, BinaryPrimitives.ReadUInt16LittleEndian(stages[0].Data.AsSpan(18, 2)));
+        Assert.Equal(0x1200, BinaryPrimitives.ReadUInt16LittleEndian(stages[0].Data.AsSpan(20, 2)));
+        Assert.Equal(0x1110, BinaryPrimitives.ReadUInt16LittleEndian(stages[0].Data.AsSpan(22, 2)));
+        Assert.Equal(0x16, stages[0].Data[25]);
+        Assert.Equal(record.Body.MzfBody, stages[1].Data);
+        Assert.Equal(345, stages[1].DelayBeforeMilliseconds);
+        Assert.False(stages[0].InvertSignal);
+        Assert.True(stages[1].InvertSignal);
+        Assert.Equal(112, stages[1].Pulses.ShortHighMicroseconds);
+        Assert.Equal(192, stages[1].Pulses.LongLowMicroseconds);
+    }
+
+    [Fact]
+    public void ProfileEncoder_GeneratesTcLoaderAndTurboBody()
+    {
+        TapeRecord record = CreateTestRecord(TapeProfile.Tc1_2);
+
+        IReadOnlyList<SharpTapeStage> stages =
+            SharpTapeProfileEncoder.Build(record, SharpTapeMachine.Mz800);
+
+        Assert.Equal(3, stages.Count);
+        Assert.Equal(90, BinaryPrimitives.ReadUInt16LittleEndian(stages[0].Data.AsSpan(18, 2)));
+        Assert.Equal(0xD400, BinaryPrimitives.ReadUInt16LittleEndian(stages[0].Data.AsSpan(20, 2)));
+        Assert.Equal(90, stages[1].Data.Length);
+        Assert.Equal(0x29, stages[1].Data[0x4B]);
+        Assert.Equal(record.Header.MzfFtype, stages[1].Data[0x4C]);
+        Assert.All(stages, stage => Assert.True(stage.InvertSignal));
+        Assert.Equal(110, stages[2].DelayBeforeMilliseconds);
+        Assert.Equal(98, stages[2].TrailingPulses);
+    }
+
+    [Fact]
+    public void ProfileEncoder_GeneratesMz700Fast3Runtime()
+    {
+        TapeRecord record = CreateTestRecord(TapeProfile.Mz700_1_3);
+
+        IReadOnlyList<SharpTapeStage> stages =
+            SharpTapeProfileEncoder.Build(record, SharpTapeMachine.Mz800);
+
+        Assert.Equal(2, stages.Count);
+        Assert.Equal(0xD080, BinaryPrimitives.ReadUInt16LittleEndian(stages[0].Data.AsSpan(22, 2)));
+        Assert.Equal(400, stages[1].DelayBeforeMilliseconds);
+        Assert.Equal(80, stages[1].Pulses.ShortHighMicroseconds);
+        Assert.Equal(160, stages[1].Pulses.LongLowMicroseconds);
+    }
+
+    [Theory]
+    [InlineData(12)]
+    [InlineData(13)]
+    [InlineData(14)]
+    public void Export_RejectsLiveHandshakeProfileBeforeCreatingFile(int profileValue)
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"qdtool-{Guid.NewGuid():N}.l16");
+        TapeRecord record = CreateTestRecord((TapeProfile)profileValue);
+
+        InvalidOperationException exception = Assert.Throws<InvalidOperationException>(
+            () => SharpTapeExporter.Export(path, [record], SharpTapeOutputFormat.L16));
+
+        Assert.Contains("WRITE/SENSE", exception.Message, StringComparison.Ordinal);
+        Assert.False(File.Exists(path));
+    }
+
+    [Fact]
+    public void SeparateExport_CreatesOneNumberedFilePerRecord()
+    {
+        string directory = TapeTestData.CreateTempDirectory();
+        try
+        {
+            var (header, body) = CreateTestBlock();
+            TapeRecord first = TapeRecord.FromLegacy(header, body);
+            MZQFileHeader secondHeader = header;
+            secondHeader.MzfFname = CreateFileName("SECOND");
+            TapeRecord second = TapeRecord.FromLegacy(secondHeader, body);
+            string selectedPath = Path.Combine(directory, "collection.l16");
+
+            IReadOnlyList<string> paths = SharpTapeExporter.ExportSeparate(
+                selectedPath,
+                [first, second],
+                SharpTapeOutputFormat.L16,
+                SharpTapeMachine.Mz800,
+                overwrite: false);
+
+            Assert.Equal(2, paths.Count);
+            Assert.EndsWith("collection_01_ROUNDTRIP.l16", paths[0], StringComparison.OrdinalIgnoreCase);
+            Assert.EndsWith("collection_02_SECOND.l16", paths[1], StringComparison.OrdinalIgnoreCase);
+            Assert.All(paths, path => Assert.True(File.Exists(path)));
+            Assert.All(paths, path => Assert.Equal(28116L, new FileInfo(path).Length));
+            Assert.False(File.Exists(selectedPath));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
     public void Export_WavRoundTripsThroughTapeMzWhenDecoderIsConfigured(int machineValue)
     {
         string? decoderPath = Environment.GetEnvironmentVariable("TAPEMZ_WAV2TMZ");
@@ -139,6 +320,15 @@ public class SharpTapeExporterTests
         };
 
         return (header, body);
+    }
+
+    private static TapeRecord CreateTestRecord(TapeProfile profile)
+    {
+        var (header, body) = CreateTestBlock();
+        TapeRecord record = TapeRecord.FromLegacy(header, body);
+        record.Profile = profile;
+        record.MetadataOrigin = MetadataOrigin.CreatedOrModifiedInAdvanced;
+        return record;
     }
 
     private static byte[] CreateFileName(string text)

@@ -191,4 +191,30 @@ public class TapeDocumentTests
         Assert.Equal(TapeProfile.Ic1_3, record.Profile);
         Assert.Equal(MetadataOrigin.LoadedFromMfi, record.MetadataOrigin);
     }
+
+    [Fact]
+    public void TapeProfileComponents_RoundTripEverySupportedProfile()
+    {
+        foreach (TapeProfile profile in Enum.GetValues<TapeProfile>())
+        {
+            (string loaderType, string speed) = TapeProfileComponents.Split(profile);
+
+            Assert.Contains(loaderType, TapeProfileComponents.LoaderTypes);
+            Assert.Contains(speed, TapeProfileComponents.GetAvailableSpeeds(loaderType));
+            Assert.Equal(profile, TapeProfileComponents.Combine(loaderType, speed));
+        }
+    }
+
+    [Theory]
+    [InlineData("NORMAL", "1:4", "1:4")]
+    [InlineData("MZ700", "1:2", "1:1")]
+    [InlineData("IC", "1:1", "1:2")]
+    [InlineData("UL_MZ800", "1:3", "")]
+    public void TapeProfileComponents_NormalizesInvalidSpeeds(
+        string loaderType,
+        string requestedSpeed,
+        string expectedSpeed)
+    {
+        Assert.Equal(expectedSpeed, TapeProfileComponents.NormalizeSpeed(loaderType, requestedSpeed));
+    }
 }

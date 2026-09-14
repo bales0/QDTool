@@ -13,9 +13,10 @@
             <ColumnDefinition Width="61*"/>
         </Grid.ColumnDefinitions>
         <DataGrid x:Name="MzfDataGrid" 
-                  IsReadOnly="True"
+                  IsReadOnly="False"
                   AllowDrop="True"
-                  SelectionMode="Single"
+                  SelectionMode="Extended"
+                  SelectionUnit="FullRow"
                   SelectionChanged="MzfDataGrid_SelectionChanged" 
                   CanUserAddRows="False" 
                   VerticalGridLinesBrush="LightGray" 
@@ -24,47 +25,44 @@
                   CanUserSortColumns="False" 
                   Margin="10,10,91,31">
             <DataGrid.Columns>
-                <DataGridTextColumn Header="Type" Binding="{Binding MzfFtypeName}" Width="Auto"/>
-                <DataGridTextColumn Header="File name" Binding="{Binding MzfFname}" Width="Auto" MinWidth="140"/>
-                <DataGridTextColumn Header="Size" Binding="{Binding MzfSize}" Width="Auto"/>
-                <DataGridTextColumn Header="Size(Hex)" Binding="{Binding MzfSizeHex}" Width="Auto"/>
-                <DataGridTextColumn x:Name="trailingColumn" Header="Trailing" Binding="{Binding TrailingData}" Width="Auto" Visibility="Collapsed"/>
-                <DataGridTextColumn Header="Start" Binding="{Binding MzfStartHex}" Width="Auto"/>
-                <DataGridTextColumn Header="Exec" Binding="{Binding MzfExecHex}" Width="Auto"/>
-                <DataGridTextColumn Header="Description" Binding="{Binding MzfHeaderDescription}" Width="*"/>
-                <DataGridTextColumn x:Name="profileColumn" Header="Profile" Binding="{Binding Profile}" Width="Auto" Visibility="Collapsed"/>
-                <DataGridTextColumn x:Name="metadataOriginColumn" Header="Metadata" Binding="{Binding MetadataOrigin}" Width="Auto" Visibility="Collapsed"/>
+                <DataGridTextColumn Header="Type" Binding="{Binding MzfFtypeName}" Width="Auto" IsReadOnly="True"/>
+                <DataGridTextColumn Header="File name" Binding="{Binding MzfFname}" Width="Auto" MinWidth="140" IsReadOnly="True"/>
+                <DataGridTextColumn Header="Size" Binding="{Binding MzfSize}" Width="Auto" IsReadOnly="True"/>
+                <DataGridTextColumn Header="Size(Hex)" Binding="{Binding MzfSizeHex}" Width="Auto" IsReadOnly="True"/>
+                <DataGridTextColumn x:Name="trailingColumn" Header="Trailing" Binding="{Binding TrailingData}" Width="Auto" Visibility="Collapsed" IsReadOnly="True"/>
+                <DataGridTextColumn Header="Start" Binding="{Binding MzfStartHex}" Width="Auto" IsReadOnly="True"/>
+                <DataGridTextColumn Header="Exec" Binding="{Binding MzfExecHex}" Width="Auto" IsReadOnly="True"/>
+                <DataGridTextColumn Header="Description" Binding="{Binding MzfHeaderDescription}" Width="*" IsReadOnly="True"/>
+                <DataGridTemplateColumn x:Name="loaderColumn" Header="Loader" Width="Auto" Visibility="Collapsed">
+                    <DataGridTemplateColumn.CellTemplate>
+                        <DataTemplate>
+                            <ComboBox ItemsSource="{Binding LoaderTypes}"
+                                      SelectedItem="{Binding LoaderType, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                      SelectionChanged="LoaderComboBox_SelectionChanged"
+                                      PreviewMouseLeftButtonDown="ProfileComboBox_PreviewMouseLeftButtonDown"
+                                      MinWidth="88"
+                                      Padding="2,0"
+                                      ToolTip="Ctrl/Shift-select rows to change the profile for all selected records."/>
+                        </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+                <DataGridTemplateColumn x:Name="speedColumn" Header="Speed" Width="Auto" Visibility="Collapsed">
+                    <DataGridTemplateColumn.CellTemplate>
+                        <DataTemplate>
+                            <ComboBox ItemsSource="{Binding AvailableSpeeds}"
+                                      SelectedItem="{Binding Speed, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                      SelectionChanged="SpeedComboBox_SelectionChanged"
+                                      PreviewMouseLeftButtonDown="ProfileComboBox_PreviewMouseLeftButtonDown"
+                                      MinWidth="58"
+                                      Padding="2,0"
+                                      ToolTip="Ctrl/Shift-select rows to change the profile for all selected records."/>
+                        </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
             </DataGrid.Columns>
         </DataGrid>
         <Button x:Name="openButton" Content="Open..." Margin="0,10,27,0" VerticalAlignment="Top" Click="button_Click_Open" HorizontalAlignment="Right" Width="66" Grid.ColumnSpan="2"/>
         <Button x:Name="saveButton" Content="Save As..." Margin="0,255,27,0" VerticalAlignment="Top" Click="button_Click_Save" HorizontalAlignment="Right" Width="66" Grid.ColumnSpan="2"/>
-        <TextBlock x:Name="tapeProfileLabel" Text="Tape profile"
-                   Margin="0,285,25,0"
-                   VerticalAlignment="Top"
-                   HorizontalAlignment="Right"
-                   Grid.ColumnSpan="2"
-                   Visibility="Collapsed"/>
-        <ComboBox x:Name="tapeProfileComboBox"
-                  SelectedIndex="0"
-                  Margin="0,303,19,0"
-                  VerticalAlignment="Top"
-                  HorizontalAlignment="Right"
-                  Width="82"
-                  Grid.ColumnSpan="2"
-                  ToolTip="Monitor timing used for LEP, L16 and WAV exports."
-                  Visibility="Collapsed">
-            <ComboBoxItem Content="MZ-800"/>
-            <ComboBoxItem Content="MZ-700"/>
-        </ComboBox>
-        <Button x:Name="editProfileButton"
-                Content="Edit profile..."
-                Margin="0,335,10,0"
-                VerticalAlignment="Top"
-                HorizontalAlignment="Right"
-                Width="100"
-                Click="button_Click_EditProfile"
-                Grid.ColumnSpan="2"
-                Visibility="Collapsed"/>
         <CheckBox x:Name="advancedFeaturesCheckBox"
                   Content="Enable advanced features"
                   Margin="10,0,0,7"

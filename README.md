@@ -14,7 +14,7 @@ You can also reorder, add or delete files. Drag&Drop is supported. For example, 
 **L16** - Export to a signed pulse-duration stream with finer 16 microsecond resolution.
 **WAV** - Export to standard 44.1 kHz, 8-bit mono PCM audio for playback into a SHARP MZ-700/800.
 
-LEP, L16 and WAV exports use the selected MZ-800 or MZ-700 NORMAL 1:1 monitor profile from MZ-SD2CMT2-Reborn. The compact stream contains one checksummed header and one checksummed data block; optional backup copies are not written.
+LEP, L16 and WAV exports use the loader and speed assigned to each record. NORMAL 1:1 through 1:4, MZ700 1:1/FAST3, IC 1:2 through 1:4 and TC 1:2 through 1:4 are generated from the MZ-SD2CMT2-Reborn timings and loader routines. UL profiles require a live WRITE/SENSE handshake and are therefore rejected for static waveform export. The compact stream contains only the blocks required by the selected profile; optional monitor backup copies are not written.
 
 ### There is work in progress on support for the following file types:
 **RAW** - Raw data grabbed from QuickDisk by QDC.  
@@ -29,7 +29,7 @@ QDTool is a Windows WPF application and requires the .NET 10 Desktop Runtime to 
 ### Basic and Advanced modes
 QDTool starts in Basic mode. Basic keeps the original simple QDF/MZQ/MZT/MZF workflow and hides waveform formats, tape profiles, sidecar metadata and trailing-data controls. Basic MZF saves omit trailing bytes; MZT saves always omit per-record trailing bytes.
 
-Enable **Enable advanced features** to show LEP/L16/WAV export, the MZ-700/MZ-800 waveform profile selector, per-record metadata columns and the **Edit profile...** command. The editor changes the selected record and can optionally apply one profile to every loaded record. Switching modes changes only the interface and never changes loaded data.
+Enable **Enable advanced features** to show LEP/L16/WAV export and per-record **Loader** and **Speed** dropdown columns. Select multiple rows with Ctrl/Shift and changing either dropdown applies that complete, valid loader/speed profile to every selected record. The MZ-700/MZ-800 choice in the waveform save dialog is only the fallback for records without an explicit profile; an assigned row profile always wins. For multiple records, the same dialog offers **Union** (one output containing every record) or **Separate** (numbered output files, one per record). Switching modes changes only the interface and never changes loaded data.
 
 Matching SD2CMT2 `.MFI` and `.MTI` sidecars are loaded automatically. A save never creates a new sidecar in Basic mode, but an already existing target sidecar is regenerated so it cannot remain inconsistent with the saved MZF/MZT. In Advanced mode, the MZF/MZT save-options dialog offers **Generate MFI** or **Generate MTI**; MZF trailing-data preservation is selected in the same context-specific dialog.
 
