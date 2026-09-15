@@ -4,7 +4,8 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Documents;
 using System.Windows.Media;
-using static QDTool.Utility;
+using static QDTool.SharpMzEncoding;
+using static QDTool.SharpQdCrc;
 
 namespace QDTool
 {

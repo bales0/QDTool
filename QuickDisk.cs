@@ -5,7 +5,9 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
-using static QDTool.Utility;
+using static QDTool.MzfFormatSupport;
+using static QDTool.SharpBinary;
+using static QDTool.SharpQdCrc;
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
 public struct MZQHeader
@@ -55,6 +57,65 @@ public struct MZQFileBody
 
 namespace QDTool
 {
+    internal static class SharpQdCrc
+    {
+        private static ushort crc;
+
+        public static ushort CRC_check(byte data, bool initialize = false)
+        {
+            if (initialize)
+            {
+                crc = 0;
+            }
+
+            byte remaining = data;
+            for (int index = 0; index < 8; index++)
+            {
+                byte xor = (byte)(remaining & 1);
+                remaining >>= 1;
+                if ((crc & 0x8000) != 0)
+                {
+                    xor ^= 1;
+                }
+
+                crc <<= 1;
+                if (xor != 0)
+                {
+                    crc ^= 0x8005;
+                }
+            }
+            return crc;
+        }
+
+        public static ushort CRC_check(ushort data, bool initialize = false)
+        {
+            CRC_check((byte)(data & 0xFF), initialize);
+            return CRC_check((byte)(data >> 8));
+        }
+
+        public static ushort CRC_check(
+            byte[] buffer,
+            int offset,
+            int count,
+            bool initialize = false)
+        {
+            bool init = initialize;
+            for (int index = offset; index < offset + count; index++)
+            {
+                CRC_check(buffer[index], init);
+                init = false;
+            }
+            return crc;
+        }
+
+        public static byte ReverseBits(byte value)
+        {
+            value = (byte)((value & 0x55) << 1 | (value >> 1) & 0x55);
+            value = (byte)((value & 0x33) << 2 | (value >> 2) & 0x33);
+            return (byte)((value & 0x0F) << 4 | (value >> 4) & 0x0F);
+        }
+    }
+
     #region Enums, records and limits
 
     public enum QdImageFormat
