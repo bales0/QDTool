@@ -8,7 +8,9 @@ You can also reorder, add or delete files. Drag&Drop is supported. For example, 
 ### Currently QDTool supports following file types:
 **QDF** - Japan QuickDisk file format created for emulators, supported by EmuZ-1500, QDC, VirtuaQD tools.  
 **MZQ** - European QuickDisk file format with simpler structure without gaps, suppoted by Unicard for SHARP MZ-700/800/1500 and SHARP MZ emulators from Zdenek Adler, Michal Hucik, Bohumil Novacek, etc.  
-**QD** - Content-detected Sharp/MZ legacy logical images and physical HxC (`HXCQDDRV`) or FlashFloppy QuickDisk images. Save As offers each QD container variant explicitly.
+**QD** - Content-detected Sharp/MZ legacy logical images and physical HxC (`HXCQDDRV`) or FlashFloppy Quickdisk images. Save As offers each Quickdisk image container variant explicitly.
+
+In Advanced mode, **New...** creates an empty MZQ or selected `.qd` variant, and **Save As...** can also create empty MZT, MZQ, QDF, or `.qd` images. Quickdisk details and **Format...** are shown only for the current `.qd` image; formatting empties it without changing its container or physical geometry. Advanced Open/Add also imports WAV, LEP, and L16 tape waveforms and maps supported NORMAL, MZ700, IC, and TC timing profiles back to the Loader and Speed columns. Standard MZ-800 editing is limited to 34 directory entries; Advanced mode identifies imported 35–50-entry images without discarding their data.
 **MZF** - Tape file conatining header and data, as on tape, supported by most SHARP MZ emulators, UniCMT and others, the extension for the same file type is sometimes also M12 or MZT.  
 **MZT** - Multiple MZF tape files concatenated one after the other as on tape, supported by MZ700Win, UniCMT.  
 **LEP** - Export to a compact signed pulse-duration stream with 50 microsecond resolution.

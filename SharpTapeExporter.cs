@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Buffers.Binary;
 using System.IO;
 using System.Linq;
 
@@ -472,6 +473,529 @@ namespace QDTool
                 writer.Write((ushort)8);
                 writer.Write(System.Text.Encoding.ASCII.GetBytes("data"));
                 writer.Write(dataSize);
+            }
+        }
+    }
+
+    internal static class SharpTapeImporter
+    {
+        private readonly record struct SignalRun(bool Level, double Microseconds);
+        private enum PendingStage { Body, TurboCopyLoader }
+        private static ReadOnlySpan<byte> TurboCopyTag => [0x5B, 0x96, 0xA5, 0x9D, 0x9A, 0xB7, 0x5D, 0x00];
+
+        public static IReadOnlyList<TapeRecord> ReadFile(string filePath)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
+            string extension = Path.GetExtension(filePath).ToLowerInvariant();
+            IReadOnlyList<SignalRun> runs = extension switch
+            {
+                ".lep" => ReadEdgeRuns(File.ReadAllBytes(filePath), 50),
+                ".l16" => ReadEdgeRuns(File.ReadAllBytes(filePath), 16),
+                ".wav" => ReadWavRuns(File.ReadAllBytes(filePath)),
+                _ => throw new ArgumentException($"Unsupported tape input extension: {extension}", nameof(filePath))
+            };
+            return DecodeRecords(runs);
+        }
+
+        private static IReadOnlyList<TapeRecord> DecodeRecords(IReadOnlyList<SignalRun> runs)
+        {
+            var records = new List<TapeRecord>();
+            int runIndex = 0;
+            byte[]? header = null;
+            TapeProfile profile = TapeProfile.Normal1_1;
+            PendingStage pendingStage = PendingStage.Body;
+
+            while (TryFindBlock(runs, runIndex, out int blockStart, out int dataStart, out double threshold, out double shortPeriod))
+            {
+                bool isHeader = header == null;
+                int dataLength = isHeader
+                    ? TapeRecord.HeaderLength
+                    : pendingStage == PendingStage.TurboCopyLoader
+                        ? 90
+                        : BinaryPrimitives.ReadUInt16LittleEndian(header!.AsSpan(18, 2));
+                byte[] data = DecodeBlockData(runs, dataStart, dataLength, threshold, out int nextRun);
+
+                if (isHeader)
+                {
+                    if (data[0] == 0 || (data[17] != 0x0D && data[17] != 0x00))
+                    {
+                        runIndex = blockStart + 2;
+                        continue;
+                    }
+                    header = data;
+                    profile = ProfileFromShortPeriod(shortPeriod);
+                    if (TryRecoverIntercopyHeader(data, out byte[]? recoveredIc, out TapeProfile icProfile))
+                    {
+                        header = recoveredIc;
+                        profile = icProfile;
+                    }
+                    else if (IsTurboCopyHeader(data))
+                    {
+                        pendingStage = PendingStage.TurboCopyLoader;
+                    }
+                    else if (TryRecoverMz700FastHeader(data, out byte[]? recoveredMz700))
+                    {
+                        header = recoveredMz700;
+                        profile = TapeProfile.Mz700_1_3;
+                    }
+                }
+                else if (pendingStage == PendingStage.TurboCopyLoader)
+                {
+                    header = RecoverTurboCopyHeader(header!, data, out profile);
+                    pendingStage = PendingStage.Body;
+                }
+                else
+                {
+                    byte[] mzf = new byte[TapeRecord.HeaderLength + data.Length];
+                    header!.CopyTo(mzf, 0);
+                    data.CopyTo(mzf, TapeRecord.HeaderLength);
+                    using var stream = new MemoryStream(mzf, writable: false);
+                    using var reader = new BinaryReader(stream);
+                    TapeRecord record = new MZTFileReader().ReadMzfRecord(reader);
+                    record.Profile = profile;
+                    record.MetadataOrigin = MetadataOrigin.CreatedOrModifiedInAdvanced;
+                    records.Add(record);
+                    header = null;
+                    pendingStage = PendingStage.Body;
+                }
+                runIndex = nextRun;
+            }
+
+            if (header != null)
+            {
+                ushort expectedBody = BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(18, 2));
+                throw new InvalidDataException(
+                    $"The tape waveform contains a header without its {expectedBody}-byte data block.");
+            }
+            if (records.Count == 0)
+            {
+                throw new InvalidDataException("The tape waveform does not contain a complete Sharp MZ file.");
+            }
+            return records;
+        }
+
+        private static bool TryRecoverIntercopyHeader(
+            byte[] encoded,
+            out byte[]? recovered,
+            out TapeProfile profile)
+        {
+            recovered = null;
+            profile = TapeProfile.Normal1_1;
+            if (encoded[0] != 0xBB || encoded[24] != 0x01)
+            {
+                return false;
+            }
+            profile = encoded[25] switch
+            {
+                0x20 => TapeProfile.Ic1_2,
+                0x16 => TapeProfile.Ic1_3,
+                0x11 => TapeProfile.Ic1_4,
+                _ => throw new InvalidDataException($"Unsupported Intercopy speed marker ${encoded[25]:X2}.")
+            };
+            recovered = (byte[])encoded.Clone();
+            recovered[0] = 0x01;
+            encoded.AsSpan(26, 6).CopyTo(recovered.AsSpan(18, 6));
+            recovered.AsSpan(24).Clear();
+            return true;
+        }
+
+        private static bool IsTurboCopyHeader(byte[] header) =>
+            header.AsSpan(24, TurboCopyTag.Length).SequenceEqual(TurboCopyTag);
+
+        private static byte[] RecoverTurboCopyHeader(
+            byte[] encodedHeader,
+            byte[] loader,
+            out TapeProfile profile)
+        {
+            if (loader.Length != 90)
+            {
+                throw new InvalidDataException("Invalid TurboCopy loader length.");
+            }
+            profile = loader[0x4B] switch
+            {
+                0x29 => TapeProfile.Tc1_2,
+                0x1B => TapeProfile.Tc1_3,
+                _ => throw new InvalidDataException($"Unsupported TurboCopy speed marker ${loader[0x4B]:X2}.")
+            };
+            byte[] recovered = (byte[])encodedHeader.Clone();
+            recovered[0] = loader[0x4C];
+            loader.AsSpan(0x4D, 13).CopyTo(recovered.AsSpan(18, 13));
+            recovered[31] = 0;
+            return recovered;
+        }
+
+        private static bool TryRecoverMz700FastHeader(byte[] encoded, out byte[]? recovered)
+        {
+            recovered = null;
+            if (encoded[0] != 0x01 ||
+                BinaryPrimitives.ReadUInt16LittleEndian(encoded.AsSpan(18, 2)) != 0 ||
+                BinaryPrimitives.ReadUInt16LittleEndian(encoded.AsSpan(22, 2)) != 0xD080)
+            {
+                return false;
+            }
+
+            int sizeInstruction = FindInstruction(encoded, 24, 0x21, 0x22, 0x02, 0x11);
+            int loadInstruction = FindInstruction(encoded, 24, 0x21, 0x22, 0x04, 0x11);
+            int jump = -1;
+            for (int index = 24; index <= encoded.Length - 7; index++)
+            {
+                if (encoded[index] == 0xAF && encoded[index + 1] == 0xD3 &&
+                    encoded[index + 2] == 0xE4 && encoded[index + 3] == 0xC3)
+                {
+                    jump = index + 3;
+                    break;
+                }
+            }
+            if (sizeInstruction < 0 || loadInstruction < 0 || jump < 0 || jump + 3 >= encoded.Length)
+            {
+                return false;
+            }
+
+            recovered = new byte[TapeRecord.HeaderLength];
+            recovered[0] = 0x01;
+            recovered[17] = 0x0D;
+            BinaryPrimitives.WriteUInt16LittleEndian(
+                recovered.AsSpan(18, 2),
+                BinaryPrimitives.ReadUInt16LittleEndian(encoded.AsSpan(sizeInstruction + 1, 2)));
+            BinaryPrimitives.WriteUInt16LittleEndian(
+                recovered.AsSpan(20, 2),
+                BinaryPrimitives.ReadUInt16LittleEndian(encoded.AsSpan(loadInstruction + 1, 2)));
+            BinaryPrimitives.WriteUInt16LittleEndian(
+                recovered.AsSpan(22, 2),
+                BinaryPrimitives.ReadUInt16LittleEndian(encoded.AsSpan(jump + 1, 2)));
+
+            int nameLength = Math.Min(16, encoded.Length - (jump + 3));
+            for (int index = 0; index < nameLength; index++)
+            {
+                if (!SharpTapeProfileEncoder.TryDecodeQadcn(encoded[jump + 3 + index], out byte value))
+                {
+                    break;
+                }
+                recovered[1 + index] = value;
+            }
+            return true;
+        }
+
+        private static int FindInstruction(
+            byte[] data,
+            int start,
+            byte opcode,
+            byte followingOpcode,
+            byte addressLow,
+            byte addressHigh)
+        {
+            for (int index = start; index <= data.Length - 6; index++)
+            {
+                if (data[index] == opcode && data[index + 3] == followingOpcode &&
+                    data[index + 4] == addressLow && data[index + 5] == addressHigh)
+                {
+                    return index;
+                }
+            }
+            return -1;
+        }
+
+        private static bool TryFindBlock(
+            IReadOnlyList<SignalRun> runs,
+            int searchStart,
+            out int blockStart,
+            out int dataStart,
+            out double threshold,
+            out double shortPeriod)
+        {
+            blockStart = dataStart = 0;
+            threshold = shortPeriod = 0;
+            int currentSearch = Math.Max(0, searchStart);
+            while (currentSearch <= runs.Count - 2200)
+            {
+                int evenCandidate = FindStableLeader(runs, currentSearch, 0);
+                int oddCandidate = FindStableLeader(runs, currentSearch, 1);
+                int preferred = (currentSearch & 1) == 0 ? evenCandidate : oddCandidate;
+                int alternate = (currentSearch & 1) == 0 ? oddCandidate : evenCandidate;
+                int candidate = preferred >= 0 ? preferred : alternate;
+                if (candidate < 0)
+                {
+                    return false;
+                }
+
+                double sample = AveragePeriod(runs, candidate, 64);
+
+                int leaderPulses = 0;
+                while (candidate + ((leaderPulses + 1) * 2) <= runs.Count)
+                {
+                    double period = Period(runs, candidate + (leaderPulses * 2));
+                    if (period < sample * 0.65 || period > sample * 1.35)
+                    {
+                        break;
+                    }
+                    leaderPulses++;
+                }
+                if (leaderPulses < 1000)
+                {
+                    currentSearch = candidate + 2;
+                    continue;
+                }
+
+                int markStart = candidate + leaderPulses * 2;
+                if (markStart + 24 >= runs.Count)
+                {
+                    return false;
+                }
+                double longPeriod = AveragePeriod(runs, markStart, 10);
+                double split = (sample + longPeriod) / 2.0;
+                if (longPeriod < sample * 1.45)
+                {
+                    currentSearch = candidate + 2;
+                    continue;
+                }
+
+                int longMark = CountPeriods(runs, markStart, value => value > split);
+                int shortMarkStart = markStart + longMark * 2;
+                int shortMark = CountPeriods(runs, shortMarkStart, value => value < split);
+                int finalMarkStart = shortMarkStart + shortMark * 2;
+                if (longMark < 10 || shortMark < 10 ||
+                    finalMarkStart + 4 > runs.Count ||
+                    Period(runs, finalMarkStart) <= split ||
+                    Period(runs, finalMarkStart + 2) <= split)
+                {
+                    currentSearch = candidate + 2;
+                    continue;
+                }
+
+                blockStart = candidate;
+                dataStart = finalMarkStart + 4;
+                threshold = split;
+                shortPeriod = sample;
+                return true;
+            }
+            return false;
+        }
+
+        private static int FindStableLeader(IReadOnlyList<SignalRun> runs, int searchStart, int parity)
+        {
+            int current = searchStart;
+            if ((current & 1) != parity)
+            {
+                current++;
+            }
+
+            int sequenceStart = current;
+            int count = 0;
+            double baseline = 0;
+            for (; current + 1 < runs.Count; current += 2)
+            {
+                double value = Period(runs, current);
+                if (value is >= 120 and <= 1200 &&
+                    (count == 0 || (value >= baseline * 0.65 && value <= baseline * 1.35)))
+                {
+                    if (count == 0)
+                    {
+                        sequenceStart = current;
+                        baseline = value;
+                    }
+                    count++;
+                    if (count >= 1000)
+                    {
+                        return sequenceStart;
+                    }
+                }
+                else
+                {
+                    count = 0;
+                    baseline = 0;
+                }
+            }
+            return -1;
+        }
+
+        private static byte[] DecodeBlockData(
+            IReadOnlyList<SignalRun> runs,
+            int dataStart,
+            int dataLength,
+            double threshold,
+            out int nextRun)
+        {
+            int encodedLength = checked(dataLength + 2);
+            int requiredRuns = checked(encodedLength * 18 + 4);
+            if (dataStart > runs.Count - requiredRuns)
+            {
+                throw new InvalidDataException("The tape waveform ends inside a data block.");
+            }
+
+            byte[] decoded = new byte[encodedLength];
+            int current = dataStart;
+            for (int byteIndex = 0; byteIndex < encodedLength; byteIndex++)
+            {
+                byte value = 0;
+                for (int bit = 0; bit < 8; bit++)
+                {
+                    value = (byte)((value << 1) | (Period(runs, current) > threshold ? 1 : 0));
+                    current += 2;
+                }
+                if (Period(runs, current) <= threshold)
+                {
+                    throw new InvalidDataException("The tape waveform has a missing LONG byte-sync pulse.");
+                }
+                current += 2;
+                decoded[byteIndex] = value;
+            }
+
+            ushort expected = ComputeChecksum(decoded.AsSpan(0, dataLength));
+            ushort actual = BinaryPrimitives.ReadUInt16BigEndian(decoded.AsSpan(dataLength, 2));
+            if (actual != expected)
+            {
+                throw new InvalidDataException($"Tape checksum mismatch: expected {expected:X4}, found {actual:X4}.");
+            }
+
+            nextRun = current + 4;
+            return decoded[..dataLength];
+        }
+
+        private static ushort ComputeChecksum(ReadOnlySpan<byte> data)
+        {
+            uint checksum = 0;
+            foreach (byte value in data)
+            {
+                checksum += (uint)System.Numerics.BitOperations.PopCount(value);
+            }
+            return unchecked((ushort)checksum);
+        }
+
+        private static TapeProfile ProfileFromShortPeriod(double period) => period switch
+        {
+            < 178 => TapeProfile.Mz700_1_3,
+            < 203 => TapeProfile.Normal1_4,
+            < 230 => TapeProfile.Normal1_3,
+            < 340 => TapeProfile.Normal1_2,
+            > 500 => TapeProfile.Mz700_1_1,
+            _ => TapeProfile.Normal1_1
+        };
+
+        private static int CountPeriods(IReadOnlyList<SignalRun> runs, int start, Func<double, bool> predicate)
+        {
+            int count = 0;
+            while (start + (count + 1) * 2 <= runs.Count && predicate(Period(runs, start + count * 2)))
+            {
+                count++;
+            }
+            return count;
+        }
+
+        private static double AveragePeriod(IReadOnlyList<SignalRun> runs, int start, int count)
+        {
+            if (start < 0 || start + count * 2 > runs.Count)
+            {
+                return double.NaN;
+            }
+            double total = 0;
+            for (int index = 0; index < count; index++)
+            {
+                total += Period(runs, start + index * 2);
+            }
+            return total / count;
+        }
+
+        private static double Period(IReadOnlyList<SignalRun> runs, int runIndex) =>
+            runs[runIndex].Microseconds + runs[runIndex + 1].Microseconds;
+
+        private static IReadOnlyList<SignalRun> ReadEdgeRuns(byte[] bytes, int unitMicroseconds)
+        {
+            var runs = new List<SignalRun>(bytes.Length);
+            foreach (byte raw in bytes)
+            {
+                int signed = unchecked((sbyte)raw);
+                if (signed == 0)
+                {
+                    throw new InvalidDataException("A LEP/L16 interval cannot be zero.");
+                }
+                // Every byte is one edge interval. Keep adjacent intervals separate:
+                // some real encoders repeat the same polarity around block gaps.
+                runs.Add(new SignalRun(signed > 0, Math.Abs(signed) * unitMicroseconds));
+            }
+            return runs;
+        }
+
+        private static IReadOnlyList<SignalRun> ReadWavRuns(byte[] wav)
+        {
+            if (wav.Length < 12 ||
+                !wav.AsSpan(0, 4).SequenceEqual("RIFF"u8) ||
+                !wav.AsSpan(8, 4).SequenceEqual("WAVE"u8))
+            {
+                throw new InvalidDataException("The file is not a RIFF/WAVE stream.");
+            }
+
+            ushort format = 0, channels = 0, bits = 0, blockAlign = 0;
+            uint sampleRate = 0;
+            ReadOnlySpan<byte> data = default;
+            int position = 12;
+            while (position <= wav.Length - 8)
+            {
+                ReadOnlySpan<byte> id = wav.AsSpan(position, 4);
+                int length = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(wav.AsSpan(position + 4, 4)));
+                position += 8;
+                if (length < 0 || position > wav.Length - length)
+                {
+                    throw new InvalidDataException("The WAV chunk extends beyond the end of the file.");
+                }
+                if (id.SequenceEqual("fmt "u8) && length >= 16)
+                {
+                    ReadOnlySpan<byte> chunk = wav.AsSpan(position, length);
+                    format = BinaryPrimitives.ReadUInt16LittleEndian(chunk);
+                    channels = BinaryPrimitives.ReadUInt16LittleEndian(chunk[2..]);
+                    sampleRate = BinaryPrimitives.ReadUInt32LittleEndian(chunk[4..]);
+                    blockAlign = BinaryPrimitives.ReadUInt16LittleEndian(chunk[12..]);
+                    bits = BinaryPrimitives.ReadUInt16LittleEndian(chunk[14..]);
+                }
+                else if (id.SequenceEqual("data"u8))
+                {
+                    data = wav.AsSpan(position, length);
+                }
+                position += length + (length & 1);
+            }
+
+            if (format != 1 || channels == 0 || sampleRate == 0 || blockAlign == 0 ||
+                bits is not 8 and not 16 || data.IsEmpty)
+            {
+                throw new NotSupportedException("Only non-empty 8-bit or 16-bit PCM WAV input is supported.");
+            }
+
+            var runs = new List<SignalRun>();
+            bool? level = null;
+            int samples = 0;
+            for (int offset = 0; offset <= data.Length - blockAlign; offset += blockAlign)
+            {
+                bool current = bits == 8
+                    ? data[offset] < 128
+                    : BinaryPrimitives.ReadInt16LittleEndian(data.Slice(offset, 2)) >= 0;
+                if (level == current)
+                {
+                    samples++;
+                    continue;
+                }
+                if (level.HasValue)
+                {
+                    AddRun(runs, level.Value, samples * 1_000_000.0 / sampleRate);
+                }
+                level = current;
+                samples = 1;
+            }
+            if (level.HasValue)
+            {
+                AddRun(runs, level.Value, samples * 1_000_000.0 / sampleRate);
+            }
+            return runs;
+        }
+
+        private static void AddRun(List<SignalRun> runs, bool level, double microseconds)
+        {
+            if (runs.Count > 0 && runs[^1].Level == level)
+            {
+                SignalRun previous = runs[^1];
+                runs[^1] = previous with { Microseconds = previous.Microseconds + microseconds };
+            }
+            else
+            {
+                runs.Add(new SignalRun(level, microseconds));
             }
         }
     }

@@ -340,6 +340,20 @@ namespace QDTool
             throw new InvalidOperationException($"MZ700 FAST3 stage byte ${displayByte:X2} is not QADCN-encodable.");
         }
 
+        internal static bool TryDecodeQadcn(byte encodedByte, out byte displayByte)
+        {
+            for (int source = 0; source < Mz700Qadcn.Length; source++)
+            {
+                if (source != 0x0D && Mz700Qadcn[source] == encodedByte)
+                {
+                    displayByte = (byte)source;
+                    return true;
+                }
+            }
+            displayByte = 0;
+            return false;
+        }
+
         private static int TrimmedNameLength(ReadOnlySpan<byte> name)
         {
             int length = 0;

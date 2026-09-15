@@ -155,17 +155,30 @@ namespace QDTool
 
         public TapeDocumentFormat Format { get; set; }
 
+        public bool IsModified { get; set; }
+
+        public QuickDiskPhysicalProfile? QuickDiskProfile { get; set; }
+
         public byte[] ContainerTrailingData { get; set; } = Array.Empty<byte>();
 
         public string? SidecarPath { get; set; }
 
         public bool HasSidecarBinding => SidecarPath != null;
 
+        public bool IsQuickDisk => Format is
+            TapeDocumentFormat.Mzq or TapeDocumentFormat.Qdf or
+            TapeDocumentFormat.QdSharpLegacy or TapeDocumentFormat.QdHxc or TapeDocumentFormat.QdFlashFloppy;
+
+        public bool IsQdImage => Format is
+            TapeDocumentFormat.QdSharpLegacy or TapeDocumentFormat.QdHxc or TapeDocumentFormat.QdFlashFloppy;
+
         public void Clear()
         {
             Records.Clear();
             FilePath = null;
             Format = TapeDocumentFormat.None;
+            IsModified = false;
+            QuickDiskProfile = null;
             ContainerTrailingData = Array.Empty<byte>();
             SidecarPath = null;
         }
