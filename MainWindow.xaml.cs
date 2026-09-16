@@ -381,7 +381,7 @@ namespace QDTool
                     MzfSize = header.MzfSize,
                     MzfStartHex = $"0x{header.MzfStart:X4}",
                     MzfExecHex = $"0x{header.MzfExec:X4}",
-                    MzfHeaderDescription = ConvertMzfNameToASCIIString(record.DescriptionRaw),
+                    MzfHeaderDescription = ConvertMzfDescriptionToASCIIString(record.DescriptionRaw),
                     TrailingData = $"{record.Body.TrailingData?.Length ?? 0} B"
                 };
                 displayData.SetProfile(record.Profile);

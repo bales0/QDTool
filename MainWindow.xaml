@@ -32,7 +32,15 @@
                 <DataGridTextColumn x:Name="trailingColumn" Header="Trailing" Binding="{Binding TrailingData}" Width="Auto" Visibility="Collapsed" IsReadOnly="True"/>
                 <DataGridTextColumn Header="Start" Binding="{Binding MzfStartHex}" Width="Auto" IsReadOnly="True"/>
                 <DataGridTextColumn Header="Exec" Binding="{Binding MzfExecHex}" Width="Auto" IsReadOnly="True"/>
-                <DataGridTextColumn Header="Description" Binding="{Binding MzfHeaderDescription}" Width="*" IsReadOnly="True"/>
+                <DataGridTemplateColumn Header="Description" Width="*" MinWidth="180" IsReadOnly="True">
+                    <DataGridTemplateColumn.CellTemplate>
+                        <DataTemplate>
+                            <TextBlock Text="{Binding MzfHeaderDescription}"
+                                       Margin="4,2"
+                                       ToolTip="{Binding MzfHeaderDescription}"/>
+                        </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
                 <DataGridTemplateColumn x:Name="loaderColumn" Header="Loader" Width="Auto" Visibility="Collapsed">
                     <DataGridTemplateColumn.CellTemplate>
                         <DataTemplate>

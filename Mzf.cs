@@ -50,6 +50,17 @@ namespace QDTool
             return Encoding.ASCII.GetString(convertedBytes, 0, endIndex);
         }
 
+        public static string ConvertMzfDescriptionToASCIIString(byte[] bytes)
+        {
+            char[] convertedCharacters = bytes
+                .Select(FromSHASCII)
+                .Select(value => char.IsControl((char)value) ? ' ' : (char)value)
+                .ToArray();
+
+            return new string(convertedCharacters)
+                .Trim();
+        }
+
         public static string ConvertFtypeToDescription(byte fileType) => fileType switch
         {
             0x01 => "OBJ",
