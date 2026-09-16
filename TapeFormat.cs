@@ -1300,7 +1300,11 @@ namespace QDTool
             out int nextRun)
         {
             int encodedLength = checked(dataLength + 2);
-            int requiredRuns = checked(encodedLength * 18 + 4);
+            // Every encoded byte is 8 data pulses + one LONG byte-sync pulse,
+            // i.e. 18 half-wave runs. Trailing pulses after the checksum are
+            // optional and are not part of the checksummed data block. Real
+            // cassette captures may legitimately stop immediately afterwards.
+            int requiredRuns = checked(encodedLength * 18);
             if (dataStart > runs.Count - requiredRuns)
             {
                 throw new InvalidDataException("The tape waveform ends inside a data block.");
@@ -1333,7 +1337,10 @@ namespace QDTool
                 throw new InvalidDataException($"Tape checksum mismatch: expected {expected:X4}, found {actual:X4}.");
             }
 
-            nextRun = current + 4;
+            // Resume searching directly after the checksum. If optional
+            // trailing pulses are present, TryFindBlock simply skips them;
+            // if the file ends here, no nonexistent trailer is required.
+            nextRun = current;
             return decoded[..dataLength];
         }
 
@@ -1456,11 +1463,30 @@ namespace QDTool
                 int signed = unchecked((sbyte)raw);
                 if (signed == 0)
                 {
-                    throw new InvalidDataException("A LEP/L16 interval cannot be zero.");
+                    // Original MZ-SD2CMT LEP/L16 convention: 0x00 is not an
+                    // edge. It extends the preceding physical level by the
+                    // maximum positive interval (127 format units). Multiple
+                    // zero bytes therefore continue the same level.
+                    if (runs.Count == 0)
+                    {
+                        throw new InvalidDataException(
+                            "A LEP/L16 continuation byte cannot appear before the first interval.");
+                    }
+
+                    SignalRun previous = runs[^1];
+                    runs[^1] = previous with
+                    {
+                        Microseconds = previous.Microseconds + (127.0 * unitMicroseconds)
+                    };
+                    continue;
                 }
-                // Every byte is one edge interval. Keep adjacent intervals separate:
-                // some real encoders repeat the same polarity around block gaps.
-                runs.Add(new SignalRun(signed > 0, Math.Abs(signed) * unitMicroseconds));
+
+                // Positive means physical connector HIGH; negative means LOW.
+                // Keep non-zero intervals separate even when two neighbouring
+                // records happen to use the same sign around a gap.
+                runs.Add(new SignalRun(
+                    signed > 0,
+                    (double)Math.Abs(signed) * unitMicroseconds));
             }
             return runs;
         }
