@@ -942,10 +942,12 @@ namespace QDTool
 
     internal static class SharpTapeImporter
     {
-        private readonly record struct SignalRun(bool Level, double Microseconds);
-        private readonly record struct ReceiverWindow(
-            double EarliestSampleMicroseconds,
-            double LatestSampleMicroseconds);
+        private enum TapeSignalFormat { Lep, L16, Wav }
+        private readonly record struct SignalRun(bool PhysicalHigh, long DurationUnits);
+        private readonly record struct TapeSignalSource(
+            IReadOnlyList<SignalRun> Runs,
+            TapeSignalFormat Format,
+            uint SampleRate = 0);
         private enum PendingStage { Body, TurboCopyLoader }
         private static ReadOnlySpan<byte> TurboCopyTag => [0x5B, 0x96, 0xA5, 0x9D, 0x9A, 0xB7, 0x5D, 0x00];
 
@@ -953,81 +955,133 @@ namespace QDTool
         {
             ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
             string extension = Path.GetExtension(filePath).ToLowerInvariant();
-            IReadOnlyList<SignalRun> runs = extension switch
+            TapeSignalSource source = extension switch
             {
-                ".lep" => ReadEdgeRuns(File.ReadAllBytes(filePath), 50),
-                ".l16" => ReadEdgeRuns(File.ReadAllBytes(filePath), 16),
+                ".lep" => ReadEdgeRuns(File.ReadAllBytes(filePath), TapeSignalFormat.Lep),
+                ".l16" => ReadEdgeRuns(File.ReadAllBytes(filePath), TapeSignalFormat.L16),
                 ".wav" => ReadWavRuns(File.ReadAllBytes(filePath)),
                 _ => throw new ArgumentException($"Unsupported tape input extension: {extension}", nameof(filePath))
             };
-            return DecodeRecords(runs);
+            return DecodeRecords(source);
         }
 
-        private static IReadOnlyList<TapeRecord> DecodeRecords(IReadOnlyList<SignalRun> runs)
+        private static IReadOnlyList<TapeRecord> DecodeRecords(TapeSignalSource source)
         {
             var records = new List<TapeRecord>();
-            int runIndex = 0;
+            var decoder = new SharpMzPulseDecoder();
+            var blockData = new List<byte>();
             byte[]? header = null;
             TapeProfile profile = TapeProfile.Normal1_1;
             PendingStage pendingStage = PendingStage.Body;
+            SharpMzDecoderEvent? failedDataCopy = null;
+            decoder.BeginHeader();
 
-            while (TryFindBlock(
-                runs,
-                runIndex,
-                out int blockStart,
-                out int dataStart,
-                out _,
-                out double shortPeriod))
+            foreach (SignalRun run in source.Runs)
             {
-                bool isHeader = header == null;
-                int dataLength = isHeader
-                    ? TapeRecord.HeaderLength
-                    : pendingStage == PendingStage.TurboCopyLoader
-                        ? 90
-                        : BinaryPrimitives.ReadUInt16LittleEndian(header!.AsSpan(18, 2));
-                TapeProfile receiverProfile = isHeader
-                    ? ProfileFromShortPeriod(shortPeriod)
-                    : pendingStage == PendingStage.TurboCopyLoader
-                        ? TapeProfile.Normal1_1
-                        : profile;
-                byte[] data = DecodeBlockData(
-                    runs,
-                    dataStart,
-                    dataLength,
-                    receiverProfile,
-                    out int nextRun);
-
-                if (isHeader)
+                decoder.FeedInterval(run.DurationUnits, run.PhysicalHigh);
+                while (decoder.TryTakeEvent(out SharpMzDecoderEvent decoderEvent))
                 {
-                    if (data[0] == 0 || (data[17] != 0x0D && data[17] != 0x00))
+                    if (decoderEvent.Type == SharpMzDecoderEventType.HeaderValid)
                     {
-                        runIndex = blockStart + 2;
+                        byte[] encodedHeader = decoder.ValidatedHeader
+                            ?? throw new InvalidDataException("The tape decoder reported a header without its data.");
+                        if (encodedHeader[0] == 0 ||
+                            (encodedHeader[17] != 0x0D && encodedHeader[17] != 0x00))
+                        {
+                            decoder.BeginHeader();
+                            header = null;
+                            pendingStage = PendingStage.Body;
+                            blockData.Clear();
+                            failedDataCopy = null;
+                            continue;
+                        }
+
+                        header = encodedHeader;
+                        profile = ProfileFromTone(
+                            decoder.HeaderShortPhysicalLowX8,
+                            decoder.HeaderShortPhysicalHighX8,
+                            decoderEvent.LeaderPulses,
+                            source);
+                        pendingStage = PendingStage.Body;
+                        if (TryRecoverIntercopyHeader(
+                            encodedHeader,
+                            out byte[]? recoveredIc,
+                            out TapeProfile icProfile))
+                        {
+                            header = recoveredIc;
+                            profile = icProfile;
+                        }
+                        else if (IsTurboCopyHeader(encodedHeader))
+                        {
+                            pendingStage = PendingStage.TurboCopyLoader;
+                        }
+                        else if (TryRecoverMz700FastHeader(encodedHeader, out byte[]? recoveredMz700))
+                        {
+                            header = recoveredMz700;
+                            profile = TapeProfile.Mz700_1_3;
+                        }
+
+                        blockData.Clear();
+                        failedDataCopy = null;
+                        int dataLength = pendingStage == PendingStage.TurboCopyLoader
+                            ? 90
+                            : BinaryPrimitives.ReadUInt16LittleEndian(header!.AsSpan(18, 2));
+                        decoder.StartData(dataLength);
                         continue;
                     }
-                    header = data;
-                    profile = ProfileFromShortPeriod(shortPeriod);
-                    if (TryRecoverIntercopyHeader(data, out byte[]? recoveredIc, out TapeProfile icProfile))
+
+                    if (decoderEvent.Type == SharpMzDecoderEventType.DataByte)
                     {
-                        header = recoveredIc;
-                        profile = icProfile;
+                        if (decoderEvent.ByteIndex == 0 && blockData.Count != 0)
+                        {
+                            // A bad byte-sync resets the state machine. If a
+                            // later leader yields a fresh block, discard bytes
+                            // emitted before the lost alignment.
+                            blockData.Clear();
+                        }
+                        if (decoderEvent.ByteIndex != blockData.Count)
+                        {
+                            throw new InvalidDataException("The tape decoder produced non-contiguous data bytes.");
+                        }
+                        blockData.Add(decoderEvent.Value);
+                        continue;
                     }
-                    else if (IsTurboCopyHeader(data))
+
+                    if (decoderEvent.Type == SharpMzDecoderEventType.BlockInvalid)
                     {
-                        pendingStage = PendingStage.TurboCopyLoader;
+                        if (pendingStage == PendingStage.TurboCopyLoader ||
+                            profile is TapeProfile.Ic1_2 or TapeProfile.Ic1_3 or TapeProfile.Ic1_4 or
+                                TapeProfile.Tc1_2 or TapeProfile.Tc1_3 ||
+                            decoderEvent.CopyIndex != 0)
+                        {
+                            throw ChecksumException(decoderEvent);
+                        }
+
+                        failedDataCopy = decoderEvent;
+                        blockData.Clear();
+                        int dataLength = header is null
+                            ? 0
+                            : BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(18, 2));
+                        decoder.StartRecoveryData(dataLength);
+                        continue;
                     }
-                    else if (TryRecoverMz700FastHeader(data, out byte[]? recoveredMz700))
+
+                    if (decoderEvent.Type != SharpMzDecoderEventType.BlockValid)
                     {
-                        header = recoveredMz700;
-                        profile = TapeProfile.Mz700_1_3;
+                        continue;
                     }
-                }
-                else if (pendingStage == PendingStage.TurboCopyLoader)
-                {
-                    header = RecoverTurboCopyHeader(header!, data, out profile);
-                    pendingStage = PendingStage.Body;
-                }
-                else
-                {
+
+                    failedDataCopy = null;
+                    if (pendingStage == PendingStage.TurboCopyLoader)
+                    {
+                        header = RecoverTurboCopyHeader(header!, blockData.ToArray(), out profile);
+                        pendingStage = PendingStage.Body;
+                        blockData.Clear();
+                        decoder.StartData(BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(18, 2)));
+                        continue;
+                    }
+
+                    byte[] data = blockData.ToArray();
                     byte[] mzf = new byte[TapeRecord.HeaderLength + data.Length];
                     header!.CopyTo(mzf, 0);
                     data.CopyTo(mzf, TapeRecord.HeaderLength);
@@ -1039,10 +1093,15 @@ namespace QDTool
                     records.Add(record);
                     header = null;
                     pendingStage = PendingStage.Body;
+                    blockData.Clear();
+                    decoder.BeginHeader();
                 }
-                runIndex = nextRun;
             }
 
+            if (failedDataCopy is SharpMzDecoderEvent checksumFailure)
+            {
+                throw ChecksumException(checksumFailure);
+            }
             if (header != null)
             {
                 ushort expectedBody = BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(18, 2));
@@ -1055,6 +1114,10 @@ namespace QDTool
             }
             return records;
         }
+
+        private static InvalidDataException ChecksumException(SharpMzDecoderEvent decoderEvent) =>
+            new($"Tape checksum mismatch: expected {decoderEvent.CalculatedChecksum:X4}, " +
+                $"found {decoderEvent.RecordedChecksum:X4}.");
 
         private static bool TryRecoverIntercopyHeader(
             byte[] encoded,
@@ -1177,285 +1240,60 @@ namespace QDTool
             return -1;
         }
 
-        private static bool TryFindBlock(
-            IReadOnlyList<SignalRun> runs,
-            int searchStart,
-            out int blockStart,
-            out int dataStart,
-            out double threshold,
-            out double shortPeriod)
+        private static TapeProfile ProfileFromTone(
+            long shortPhysicalLowX8,
+            long shortPhysicalHighX8,
+            int leaderPulses,
+            TapeSignalSource source)
         {
-            blockStart = dataStart = 0;
-            threshold = shortPeriod = 0;
-            int currentSearch = Math.Max(0, searchStart);
-            while (currentSearch <= runs.Count - 2200)
+            long normalized = NormalizeShortX8(shortPhysicalLowX8, source);
+            long d1 = Math.Abs(normalized - 120);
+            long d2 = Math.Abs(normalized - 57);
+            long d3 = Math.Abs(normalized - 44);
+            long d4 = Math.Abs(normalized - 39);
+            long normalizedHigh = NormalizeShortX8(shortPhysicalHighX8, source);
+
+            if (leaderPulses is >= 8000 and <= 13000 &&
+                d4 < d3 && d4 < d2 && d4 < d1)
             {
-                int evenCandidate = FindStableLeader(runs, currentSearch, 0);
-                int oddCandidate = FindStableLeader(runs, currentSearch, 1);
-                int candidate = evenCandidate >= 0 && !runs[evenCandidate].Level
-                    ? evenCandidate
-                    : oddCandidate >= 0 && !runs[oddCandidate].Level
-                        ? oddCandidate
-                        : -1;
-                if (candidate < 0)
+                // Native-unit quantization can bias the integer LOW IIR toward
+                // the 1:4 reference. The independently averaged HIGH half-wave
+                // keeps QDTool's 1:3 metadata distinct without entering Sharp
+                // pulse classification.
+                if (normalizedHigh >= 61)
                 {
-                    return false;
+                    return TapeProfile.Normal1_3;
                 }
-
-                double sample = AveragePeriod(runs, candidate, 64);
-
-                int leaderPulses = 0;
-                while (candidate + ((leaderPulses + 1) * 2) <= runs.Count)
-                {
-                    double period = Period(runs, candidate + (leaderPulses * 2));
-                    if (period < sample * 0.65 || period > sample * 1.35)
-                    {
-                        break;
-                    }
-                    leaderPulses++;
-                }
-                if (leaderPulses < 1000)
-                {
-                    currentSearch = candidate + 2;
-                    continue;
-                }
-
-                int markStart = candidate + leaderPulses * 2;
-                if (markStart + 24 >= runs.Count)
-                {
-                    return false;
-                }
-                double longPeriod = AveragePeriod(runs, markStart, 10);
-                double split = (sample + longPeriod) / 2.0;
-                if (longPeriod < sample * 1.45)
-                {
-                    currentSearch = candidate + 2;
-                    continue;
-                }
-
-                int longMark = CountPeriods(runs, markStart, value => value > split);
-                int shortMarkStart = markStart + longMark * 2;
-                int shortMark = CountPeriods(runs, shortMarkStart, value => value < split);
-                int finalMarkStart = shortMarkStart + shortMark * 2;
-                if (longMark < 10 || shortMark < 10 ||
-                    finalMarkStart + 4 > runs.Count ||
-                    Period(runs, finalMarkStart) <= split ||
-                    Period(runs, finalMarkStart + 2) <= split)
-                {
-                    currentSearch = candidate + 2;
-                    continue;
-                }
-
-                blockStart = candidate;
-                dataStart = finalMarkStart + 4;
-                threshold = split;
-                shortPeriod = sample;
-                return true;
+                return TapeProfile.Normal1_4;
             }
-            return false;
+            if (d2 < d1 && d2 <= d3)
+            {
+                return TapeProfile.Normal1_2;
+            }
+            if (d3 < d1 && d3 < d2)
+            {
+                return TapeProfile.Normal1_3;
+            }
+
+            // MZ-700 and MZ-800 Normal 1:1 have the same decisive physical-LOW
+            // half-wave. Keep classification LOW-only and use the independently
+            // observed physical-HIGH half-wave solely as a metadata tie-breaker.
+            return normalizedHigh >= 130
+                ? TapeProfile.Mz700_1_1
+                : TapeProfile.Normal1_1;
         }
 
-        private static int FindStableLeader(IReadOnlyList<SignalRun> runs, int searchStart, int parity)
-        {
-            int current = searchStart;
-            if ((current & 1) != parity)
+        private static long NormalizeShortX8(long shortX8, TapeSignalSource source) =>
+            source.Format switch
             {
-                current++;
-            }
+                TapeSignalFormat.L16 => shortX8,
+                TapeSignalFormat.Lep => ((shortX8 * 50) + 8) / 16,
+                TapeSignalFormat.Wav when source.SampleRate != 0 =>
+                    ((shortX8 * 62500) + (source.SampleRate / 2)) / source.SampleRate,
+                _ => shortX8
+            };
 
-            int sequenceStart = current;
-            int count = 0;
-            double baseline = 0;
-            for (; current + 1 < runs.Count; current += 2)
-            {
-                double value = Period(runs, current);
-                if (value is >= 120 and <= 1200 &&
-                    (count == 0 || (value >= baseline * 0.65 && value <= baseline * 1.35)))
-                {
-                    if (count == 0)
-                    {
-                        sequenceStart = current;
-                        baseline = value;
-                    }
-                    count++;
-                    if (count >= 1000)
-                    {
-                        return sequenceStart;
-                    }
-                }
-                else
-                {
-                    count = 0;
-                    baseline = 0;
-                }
-            }
-            return -1;
-        }
-
-        private static byte[] DecodeBlockData(
-            IReadOnlyList<SignalRun> runs,
-            int dataStart,
-            int dataLength,
-            TapeProfile receiverProfile,
-            out int nextRun)
-        {
-            int encodedLength = checked(dataLength + 2);
-            // Every encoded byte is 8 data pulses + one LONG byte-sync pulse,
-            // i.e. 18 half-wave runs. Trailing pulses after the checksum are
-            // optional and are not part of the checksummed data block. Real
-            // cassette captures may legitimately stop immediately afterwards.
-            int requiredRuns = checked(encodedLength * 18);
-            if (dataStart > runs.Count - requiredRuns)
-            {
-                throw new InvalidDataException("The tape waveform ends inside a data block.");
-            }
-
-            byte[] decoded = new byte[encodedLength];
-            int current = dataStart;
-            ReceiverWindow receiver = ReceiverWindowFor(receiverProfile);
-            for (int byteIndex = 0; byteIndex < encodedLength; byteIndex++)
-            {
-                byte value = 0;
-                for (int bit = 0; bit < 8; bit++)
-                {
-                    value = (byte)((value << 1) |
-                        DecodeHardwareBit(runs, current, receiver));
-                    current += 2;
-                }
-                if (DecodeHardwareBit(runs, current, receiver) == 0)
-                {
-                    throw new InvalidDataException("The tape waveform has a missing LONG byte-sync pulse.");
-                }
-                current += 2;
-                decoded[byteIndex] = value;
-            }
-
-            ushort expected = ComputeChecksum(decoded.AsSpan(0, dataLength));
-            ushort actual = BinaryPrimitives.ReadUInt16BigEndian(decoded.AsSpan(dataLength, 2));
-            if (actual != expected)
-            {
-                throw new InvalidDataException($"Tape checksum mismatch: expected {expected:X4}, found {actual:X4}.");
-            }
-
-            // Resume searching directly after the checksum. If optional
-            // trailing pulses are present, TryFindBlock simply skips them;
-            // if the file ends here, no nonexistent trailer is required.
-            nextRun = current;
-            return decoded[..dataLength];
-        }
-
-        private static byte DecodeHardwareBit(
-            IReadOnlyList<SignalRun> runs,
-            int runIndex,
-            ReceiverWindow receiver)
-        {
-            // The READ input is inverted from the connector. The MZ waits for
-            // the resulting logical rising edge, then samples while the
-            // connector is LOW. It does not classify the complete period.
-            if (runs[runIndex].Level || !runs[runIndex + 1].Level)
-            {
-                throw new InvalidDataException(
-                    "The tape waveform has invalid connector polarity or a missing edge.");
-            }
-
-            double logicalHighDuration = runs[runIndex].Microseconds;
-            if (logicalHighDuration < receiver.EarliestSampleMicroseconds)
-            {
-                return 0;
-            }
-            if (logicalHighDuration > receiver.LatestSampleMicroseconds)
-            {
-                return 1;
-            }
-
-            throw new InvalidDataException(
-                $"The tape pulse transition at {logicalHighDuration:F3} us falls inside the " +
-                $"MZ receiver sampling window {receiver.EarliestSampleMicroseconds:F3}–" +
-                $"{receiver.LatestSampleMicroseconds:F3} us.");
-        }
-
-        private static ReceiverWindow ReceiverWindowFor(TapeProfile profile) => profile switch
-        {
-            // MZ-800 1Z-013B monitor ROM, including the ROM polling window.
-            TapeProfile.Normal1_1 => new(347.630, 362.291),
-            // Unhooked RAM RBYTE path with the corresponding DLY3 operand.
-            TapeProfile.Normal1_2 => Mz800RamReceiverWindow(0x20),
-            TapeProfile.Normal1_3 => Mz800RamReceiverWindow(0x16),
-            TapeProfile.Normal1_4 => Mz800RamReceiverWindow(0x11),
-            // MZ-700 1Z-013A PAL monitor ROM.
-            TapeProfile.Mz700_1_1 => new(348.758, 366.238),
-            // MZ-700 FAST3 RAM receiver, DLY3=$15.
-            TapeProfile.Mz700_1_3 => new(106.855, 121.515),
-            // Intercopy adds an 86-T-state hook after EDGE.
-            TapeProfile.Ic1_2 => Mz800RamReceiverWindow(0x20, extraTStates: 86),
-            TapeProfile.Ic1_3 => Mz800RamReceiverWindow(0x16, extraTStates: 86),
-            TapeProfile.Ic1_4 => Mz800RamReceiverWindow(0x11, extraTStates: 86),
-            TapeProfile.Tc1_2 => Mz800RamReceiverWindow(0x29),
-            TapeProfile.Tc1_3 => Mz800RamReceiverWindow(0x1B),
-            _ => throw new NotSupportedException(
-                $"{TapeProfileNames.ToDisplayName(profile)} has no static MZ receiver window.")
-        };
-
-        private static ReceiverWindow Mz800RamReceiverWindow(
-            int dly3Operand,
-            int extraTStates = 0)
-        {
-            const double clockHz = 3_546_875.0;
-            int earliestTStates = 85 + (14 * dly3Operand) + extraTStates;
-            int latestTStates = earliestTStates + 52;
-            return new ReceiverWindow(
-                earliestTStates * 1_000_000.0 / clockHz,
-                latestTStates * 1_000_000.0 / clockHz);
-        }
-
-        private static ushort ComputeChecksum(ReadOnlySpan<byte> data)
-        {
-            uint checksum = 0;
-            foreach (byte value in data)
-            {
-                checksum += (uint)System.Numerics.BitOperations.PopCount(value);
-            }
-            return unchecked((ushort)checksum);
-        }
-
-        private static TapeProfile ProfileFromShortPeriod(double period) => period switch
-        {
-            < 178 => TapeProfile.Mz700_1_3,
-            < 203 => TapeProfile.Normal1_4,
-            < 230 => TapeProfile.Normal1_3,
-            < 340 => TapeProfile.Normal1_2,
-            > 500 => TapeProfile.Mz700_1_1,
-            _ => TapeProfile.Normal1_1
-        };
-
-        private static int CountPeriods(IReadOnlyList<SignalRun> runs, int start, Func<double, bool> predicate)
-        {
-            int count = 0;
-            while (start + (count + 1) * 2 <= runs.Count && predicate(Period(runs, start + count * 2)))
-            {
-                count++;
-            }
-            return count;
-        }
-
-        private static double AveragePeriod(IReadOnlyList<SignalRun> runs, int start, int count)
-        {
-            if (start < 0 || start + count * 2 > runs.Count)
-            {
-                return double.NaN;
-            }
-            double total = 0;
-            for (int index = 0; index < count; index++)
-            {
-                total += Period(runs, start + index * 2);
-            }
-            return total / count;
-        }
-
-        private static double Period(IReadOnlyList<SignalRun> runs, int runIndex) =>
-            runs[runIndex].Microseconds + runs[runIndex + 1].Microseconds;
-
-        private static IReadOnlyList<SignalRun> ReadEdgeRuns(byte[] bytes, int unitMicroseconds)
+        private static TapeSignalSource ReadEdgeRuns(byte[] bytes, TapeSignalFormat format)
         {
             var runs = new List<SignalRun>(bytes.Length);
             foreach (byte raw in bytes)
@@ -1476,22 +1314,20 @@ namespace QDTool
                     SignalRun previous = runs[^1];
                     runs[^1] = previous with
                     {
-                        Microseconds = previous.Microseconds + (127.0 * unitMicroseconds)
+                        DurationUnits = checked(previous.DurationUnits + 127)
                     };
                     continue;
                 }
 
                 // Positive means physical connector HIGH; negative means LOW.
-                // Keep non-zero intervals separate even when two neighbouring
-                // records happen to use the same sign around a gap.
-                runs.Add(new SignalRun(
-                    signed > 0,
-                    (double)Math.Abs(signed) * unitMicroseconds));
+                // Equal neighbouring levels have no physical edge between them,
+                // so they form one edge-to-edge interval.
+                AddRun(runs, signed > 0, Math.Abs(signed));
             }
-            return runs;
+            return new TapeSignalSource(runs, format);
         }
 
-        private static IReadOnlyList<SignalRun> ReadWavRuns(byte[] wav)
+        private static TapeSignalSource ReadWavRuns(byte[] wav)
         {
             if (wav.Length < 12 ||
                 !wav.AsSpan(0, 4).SequenceEqual("RIFF"u8) ||
@@ -1537,12 +1373,28 @@ namespace QDTool
 
             var runs = new List<SignalRun>();
             bool? level = null;
-            int samples = 0;
+            long samples = 0;
+            bool digital8BitLevel = false;
             for (int offset = 0; offset <= data.Length - blockAlign; offset += blockAlign)
             {
-                bool current = bits == 8
-                    ? data[offset] >= 128
-                    : BinaryPrimitives.ReadInt16LittleEndian(data.Slice(offset, 2)) >= 0;
+                bool current;
+                if (bits == 8)
+                {
+                    byte sample = data[offset];
+                    if (!digital8BitLevel && sample >= 155)
+                    {
+                        digital8BitLevel = true;
+                    }
+                    else if (digital8BitLevel && sample <= 100)
+                    {
+                        digital8BitLevel = false;
+                    }
+                    current = digital8BitLevel;
+                }
+                else
+                {
+                    current = BinaryPrimitives.ReadInt16LittleEndian(data.Slice(offset, 2)) >= 0;
+                }
                 if (level == current)
                 {
                     samples++;
@@ -1550,28 +1402,31 @@ namespace QDTool
                 }
                 if (level.HasValue)
                 {
-                    AddRun(runs, level.Value, samples * 1_000_000.0 / sampleRate);
+                    AddRun(runs, level.Value, samples);
                 }
                 level = current;
                 samples = 1;
             }
             if (level.HasValue)
             {
-                AddRun(runs, level.Value, samples * 1_000_000.0 / sampleRate);
+                AddRun(runs, level.Value, samples);
             }
-            return runs;
+            return new TapeSignalSource(runs, TapeSignalFormat.Wav, sampleRate);
         }
 
-        private static void AddRun(List<SignalRun> runs, bool level, double microseconds)
+        private static void AddRun(List<SignalRun> runs, bool physicalHigh, long durationUnits)
         {
-            if (runs.Count > 0 && runs[^1].Level == level)
+            if (runs.Count > 0 && runs[^1].PhysicalHigh == physicalHigh)
             {
                 SignalRun previous = runs[^1];
-                runs[^1] = previous with { Microseconds = previous.Microseconds + microseconds };
+                runs[^1] = previous with
+                {
+                    DurationUnits = checked(previous.DurationUnits + durationUnits)
+                };
             }
             else
             {
-                runs.Add(new SignalRun(level, microseconds));
+                runs.Add(new SignalRun(physicalHigh, durationUnits));
             }
         }
     }
