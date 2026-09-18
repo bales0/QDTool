@@ -103,7 +103,7 @@ namespace QDTool
             : "Quickdisk file (*.qdf)|*.qdf|Quickdisk file (*.mzq)|*.mzq|Multiple files tape (*.mzt)|*.mzt|Single tape file (*.mzf)|*.mzf|All files (*.*)|*.*";
 
         public static string GetExportFilter(bool advanced) => advanced
-            ? "Single tape file (*.mzf)|*.mzf|LEP pulse file (*.lep)|*.lep|L16 pulse file (*.l16)|*.l16|Wave audio (*.wav)|*.wav"
+            ? "Multiple files tape (*.mzt)|*.mzt|Single tape file (*.mzf)|*.mzf|LEP pulse file (*.lep)|*.lep|L16 pulse file (*.l16)|*.l16|Wave audio (*.wav)|*.wav"
             : "Single tape file (*.mzf)|*.mzf";
     }
 
@@ -603,6 +603,180 @@ namespace QDTool
                 MessageBoxImage.Question);
             preserveTrailing = result == MessageBoxResult.Yes;
             return result != MessageBoxResult.Cancel;
+        }
+
+        private List<(int Index, TapeRecord Record)> GetSelectedRecordsInGridOrder()
+        {
+            return MzfDataGrid.SelectedItems
+                .OfType<MzfDisplayData>()
+                .Select(item => MzfDisplayDataCollection.IndexOf(item))
+                .Where(index => index >= 0 && index < mzfBlocks.Count)
+                .Distinct()
+                .OrderBy(index => index)
+                .Select(index => (index, mzfBlocks[index]))
+                .ToList();
+        }
+
+        private void ExportRecords(
+            IReadOnlyList<(int Index, TapeRecord Record)> selectedRecords,
+            string suggestedFileName)
+        {
+            if (selectedRecords.Count == 0)
+            {
+                return;
+            }
+
+            foreach ((int index, TapeRecord record) in selectedRecords)
+            {
+                if (!TryValidateBlock(record, index, out string validationError))
+                {
+                    MessageBox.Show(validationError, "Cannot export", MessageBoxButton.OK, MessageBoxImage.Error);
+                    return;
+                }
+            }
+
+            List<TapeRecord> records = selectedRecords
+                .Select(value => value.Record)
+                .ToList();
+
+            bool multipleRecords = records.Count > 1;
+            var saveFileDialog = new SaveFileDialog
+            {
+                Filter = GetExportFilter(),
+                AddExtension = true,
+                DefaultExt = AdvancedFeaturesEnabled && multipleRecords ? ".mzt" : ".mzf",
+                FilterIndex = AdvancedFeaturesEnabled && !multipleRecords ? 2 : 1,
+                FileName = suggestedFileName
+            };
+
+            if (saveFileDialog.ShowDialog() != true)
+            {
+                return;
+            }
+
+            string filePath = saveFileDialog.FileName;
+            string fileExtension = System.IO.Path.GetExtension(filePath).ToLowerInvariant();
+
+            try
+            {
+                if (fileExtension == ".mzt" && AdvancedFeaturesEnabled)
+                {
+                    if (!TryChooseTapeSaveOptions(
+                        filePath,
+                        TapeDocumentFormat.Mzt,
+                        trailingBytes: 0,
+                        out _,
+                        out bool generateSidecar))
+                    {
+                        return;
+                    }
+
+                    TapeDocumentWriter.SaveMzt(
+                        filePath,
+                        records.Select(record => record.DeepClone()).ToList(),
+                        generateSidecar);
+                    return;
+                }
+
+                if (fileExtension == ".mzf")
+                {
+                    if (records.Count == 1)
+                    {
+                        TapeRecord exportRecord = records[0].DeepClone();
+                        int trailingBytes = records[0].Body.TrailingData?.Length ?? 0;
+                        if (!TryChooseTapeSaveOptions(
+                            filePath,
+                            TapeDocumentFormat.Mzf,
+                            trailingBytes,
+                            out bool preserve,
+                            out bool generateSidecar))
+                        {
+                            return;
+                        }
+
+                        TapeDocumentWriter.SaveMzf(
+                            filePath,
+                            exportRecord,
+                            preserve,
+                            generateSidecar);
+                        return;
+                    }
+
+                    if (!TryChoosePreserveTrailing(records, out bool preserveMultiple))
+                    {
+                        return;
+                    }
+
+                    IReadOnlyList<string> outputPaths =
+                        SharpTapeExporter.GetSeparateOutputPaths(filePath, records);
+                    string[] existingPaths = outputPaths.Where(File.Exists).ToArray();
+                    if (existingPaths.Length > 0)
+                    {
+                        MessageBoxResult overwrite = MessageBox.Show(
+                            this,
+                            $"{existingPaths.Length} separate MZF file(s) already exist. Overwrite them?",
+                            "Overwrite separate files",
+                            MessageBoxButton.YesNo,
+                            MessageBoxImage.Warning);
+                        if (overwrite != MessageBoxResult.Yes)
+                        {
+                            return;
+                        }
+                    }
+
+                    for (int index = 0; index < records.Count; index++)
+                    {
+                        TapeDocumentWriter.SaveMzf(
+                            outputPaths[index],
+                            records[index].DeepClone(),
+                            preserveMultiple);
+                    }
+
+                    MessageBox.Show(
+                        this,
+                        $"Created {outputPaths.Count} separate MZF files in:\n{System.IO.Path.GetDirectoryName(outputPaths[0])}",
+                        "Separate export complete",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Information);
+                    return;
+                }
+
+                if (AdvancedFeaturesEnabled &&
+                    fileExtension is ".lep" or ".l16" or ".wav")
+                {
+                    if (!TryChooseWaveformSaveOptions(
+                        fileExtension,
+                        records.Count,
+                        out SharpTapeMachine machine,
+                        out bool separateFiles))
+                    {
+                        return;
+                    }
+
+                    ExportWaveform(
+                        filePath,
+                        records,
+                        SharpTapeExporter.GetFormat(fileExtension),
+                        machine,
+                        separateFiles);
+                    return;
+                }
+
+                MessageBox.Show(
+                    $"I do not know how to export a file with extension {fileExtension}.",
+                    "Unknown file extension",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    this,
+                    ex.Message,
+                    "Error exporting files",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+            }
         }
 
         private void button_Click_Open(object sender, RoutedEventArgs e)
@@ -1130,73 +1304,19 @@ namespace QDTool
 
         private void button_Click_Export(object sender, RoutedEventArgs e)
         {
-            int selectedIndex = MzfDataGrid.SelectedIndex; // Získání indexu vybraného řádku
-
-            if (selectedIndex >= 0 && selectedIndex < mzfBlocks.Count)
+            List<(int Index, TapeRecord Record)> selectedRecords = GetSelectedRecordsInGridOrder();
+            if (selectedRecords.Count == 0)
             {
-                TapeRecord item = mzfBlocks[selectedIndex];
-
-                if (!TryValidateBlock(item, selectedIndex, out string validationError))
-                {
-                    MessageBox.Show(validationError, "Cannot export", MessageBoxButton.OK, MessageBoxImage.Error);
-                    return;
-                }
-
-                SaveFileDialog saveFileDialog = new SaveFileDialog();
-                saveFileDialog.Filter = GetExportFilter();
-                saveFileDialog.AddExtension = true;
-                saveFileDialog.DefaultExt = ".mzf";
-                MZQFileHeader header = item.Header;
-                MZQFileBody body = item.Body;
-                saveFileDialog.FileName = ConvertMzfNameToASCIIString(header.MzfFname);
-
-                if (saveFileDialog.ShowDialog() == true)
-                {
-                    string filePath = saveFileDialog.FileName;
-
-                    string fileExtension = System.IO.Path.GetExtension(filePath).ToLowerInvariant();
-                    if (fileExtension == ".mzf")
-                    {
-                        TapeRecord exportRecord = item.DeepClone();
-                        int trailingBytes = item.Body.TrailingData?.Length ?? 0;
-                        if (!TryChooseTapeSaveOptions(
-                            filePath,
-                            TapeDocumentFormat.Mzf,
-                            trailingBytes,
-                            out bool preserve,
-                            out bool generateSidecar))
-                        {
-                            return;
-                        }
-                        TapeDocumentWriter.SaveMzf(filePath, exportRecord, preserve, generateSidecar);
-                    }
-                    else if (AdvancedFeaturesEnabled && (fileExtension == ".lep" || fileExtension == ".l16" || fileExtension == ".wav"))
-                    {
-                        if (!TryChooseWaveformSaveOptions(
-                            fileExtension,
-                            recordCount: 1,
-                            out SharpTapeMachine machine,
-                            out bool separateFiles))
-                        {
-                            return;
-                        }
-                        ExportWaveform(
-                            filePath,
-                            new[] { item },
-                            SharpTapeExporter.GetFormat(fileExtension),
-                            machine,
-                            separateFiles);
-                    }
-                    else
-                    {
-                        MessageBox.Show(
-                            $"I do not know how to export a file with extension {fileExtension}.",
-                            "Unknown file extension",
-                            MessageBoxButton.OK,
-                            MessageBoxImage.Error);
-                    }
-                }
+                return;
             }
+
+            string suggestedFileName = selectedRecords.Count == 1
+                ? ConvertMzfNameToASCIIString(selectedRecords[0].Record.Header.MzfFname)
+                : (!string.IsNullOrWhiteSpace(actFileName)
+                    ? System.IO.Path.GetFileNameWithoutExtension(actFileName)
+                    : "selected");
+
+            ExportRecords(selectedRecords, suggestedFileName);
         }
 
         private void check_QDF_Files()
@@ -1315,45 +1435,20 @@ namespace QDTool
 
         private void button_Click_ExportAll(object sender, RoutedEventArgs e)
         {
-            if (!TryValidateAllBlocks(out string validationError))
+            if (mzfBlocks.Count == 0)
             {
-                MessageBox.Show(validationError, "Cannot export", MessageBoxButton.OK, MessageBoxImage.Error);
                 return;
             }
 
-            OpenFileDialog dialog = new OpenFileDialog
-            {
-                ValidateNames = false,
-                CheckFileExists = false,
-                CheckPathExists = true,
-                FileName = "Select folder",
-                Filter = "Folders|*.this.directory",
-                DereferenceLinks = true // odkazy na složky budou následovány
-            };
+            List<(int Index, TapeRecord Record)> allRecords = mzfBlocks
+                .Select((record, index) => (index, record))
+                .ToList();
 
-            if (dialog.ShowDialog() == true)
-            {
-                string? exportPath = System.IO.Path.GetDirectoryName(dialog.FileName);
+            string suggestedFileName = !string.IsNullOrWhiteSpace(actFileName)
+                ? System.IO.Path.GetFileNameWithoutExtension(actFileName)
+                : "export_all";
 
-                if (exportPath == null)
-                {
-                    MessageBox.Show("Export path cannot be empty", "Invalid path", MessageBoxButton.OK, MessageBoxImage.Error);
-                }
-                else
-                {
-                    HashSet<string> reservedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                    if (!TryChoosePreserveTrailing(mzfBlocks, out bool preserve))
-                    {
-                        return;
-                    }
-                    foreach (TapeRecord record in mzfBlocks)
-                    {
-                        string fileName = ConvertMzfNameToASCIIString(record.Header.MzfFname);
-                        string filePath = GetAvailableExportPath(exportPath, fileName, reservedPaths);
-                        TapeDocumentWriter.SaveMzf(filePath, record.DeepClone(), preserve);
-                    }
-                }
-            }
+            ExportRecords(allRecords, suggestedFileName);
         }
 
         private void button_Click_ClearAll(object sender, RoutedEventArgs e)

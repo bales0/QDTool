@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.Text;
 using System.Windows;
 
@@ -17,61 +16,114 @@ namespace QDTool
         {
             PcmAudioFormat format = statistics.Format;
             var text = new StringBuilder();
-            text.AppendLine($"Source format:         {statistics.SourceFormat}");
-            text.AppendLine($"Duration:              {FormatDuration(statistics.DurationSeconds)}");
-            text.AppendLine($"Sample rate:           {format.SampleRate:N0} Hz");
-            text.AppendLine($"Bit depth:             {format.BitsPerSample} bit");
-            text.AppendLine($"Channels:              {format.Channels}");
-            text.AppendLine($"PCM frames:            {format.FrameCount:N0}");
-            text.AppendLine($"Signal polarity:       {FormatOverallPolarity(statistics.RecordRecoveries)}");
+
+            text.AppendLine($"Source: {statistics.SourceFormat}    Duration: {FormatDuration(statistics.DurationSeconds)}");
+            text.AppendLine(
+                $"Format: {format.SampleRate:N0} Hz / {format.BitsPerSample} bit / " +
+                $"{format.Channels} channel(s) / {format.FrameCount:N0} frames");
+            text.AppendLine(
+                $"Signal polarity: {(statistics.SelectedInverted ? "inverted" : "normal")} " +
+                "(one global polarity used for the whole recording)");
             text.AppendLine();
-            text.AppendLine($"Header candidates:     {statistics.HeaderCandidates:N0}");
-            text.AppendLine($"Payload candidates:    {statistics.PayloadCandidates:N0}");
-            text.AppendLine($"Valid payload candidates: {statistics.ValidPayloadCandidates:N0}");
-            text.AppendLine($"Result records:        {statistics.ResultRecords:N0}");
-            text.AppendLine($"Reconstructed records: {statistics.ReconstructedRecords:N0}");
-            text.AppendLine($"Selective recovery:    {(statistics.SelectiveRecoveryUsed ? "used" : "not needed")}");
+            text.AppendLine(
+                $"Candidates: header {statistics.HeaderCandidates:N0}, payload {statistics.PayloadCandidates:N0}, " +
+                $"valid payload {statistics.ValidPayloadCandidates:N0}");
+            text.AppendLine(
+                $"Result: {statistics.ResultRecords:N0} record(s), reconstructed {statistics.ReconstructedRecords:N0}, " +
+                $"selective recovery {(statistics.SelectiveRecoveryUsed ? "used" : "not needed")}");
             text.AppendLine();
             text.AppendLine("Detected records:");
+
             for (int index = 0; index < statistics.RecordRecoveries.Count; index++)
             {
                 WavRecoveryInfo recovery = statistics.RecordRecoveries[index];
+                SharpBlockCandidate header = recovery.Header.Candidate;
+                SharpBlockCandidate payload = recovery.Payload.Candidate;
+
+                text.AppendLine();
                 text.AppendLine(
-                    $"  {index + 1}. {TapeProfileNames.ToDisplayName(recovery.Header.Candidate.Profile)}, " +
-                    $"polarity {FormatRecordPolarity(recovery)}");
+                    $"{index + 1}. {TapeProfileNames.ToDisplayName(recovery.FinalProfile)}    " +
+                    $"evidence: {FormatProfileEvidence(header.ProfileEvidence)}" +
+                    (recovery.ReconstructionUsed ? "    [reconstructed payload]" : string.Empty));
+                text.AppendLine(
+                    $"   Header : {FormatSource(header)}");
+                text.AppendLine(
+                    $"   Payload: {FormatSource(payload)}");
+
+                AppendTiming(text, "H", header);
+                AppendTiming(text, "P", payload);
+
+                if (recovery.Native1xAnalysis is Native1xTimingAnalysis native)
+                {
+                    text.AppendLine(
+                        $"   Native 1:1 ratios: H {FormatRatio(native.HeaderPeriodRatio)}, " +
+                        $"P {FormatRatio(native.PayloadPeriodRatio)}");
+                    text.AppendLine(
+                        $"   Native 1:1 fit: MZ800 H/P {FormatPercent(native.HeaderMz800Error)}/" +
+                        $"{FormatPercent(native.PayloadMz800Error)}, MZ700 H/P " +
+                        $"{FormatPercent(native.HeaderMz700Error)}/{FormatPercent(native.PayloadMz700Error)}");
+                    text.AppendLine(
+                        $"   Combined fit: MZ800 {FormatPercent(native.CombinedMz800Error)}, " +
+                        $"MZ700 {FormatPercent(native.CombinedMz700Error)} -> " +
+                        TapeProfileNames.ToDisplayName(native.ResultProfile));
+                }
             }
+
             return text.ToString();
         }
 
-        private static string FormatOverallPolarity(IReadOnlyList<WavRecoveryInfo> recoveries)
+        private static void AppendTiming(StringBuilder text, string prefix, SharpBlockCandidate candidate)
         {
-            bool anyNormal = false;
-            bool anyInverted = false;
-            foreach (WavRecoveryInfo recovery in recoveries)
+            if (!double.IsFinite(candidate.TimingShortHighMicroseconds) ||
+                !double.IsFinite(candidate.TimingShortLowMicroseconds) ||
+                !double.IsFinite(candidate.TimingLongHighMicroseconds) ||
+                !double.IsFinite(candidate.TimingLongLowMicroseconds))
             {
-                anyInverted |= recovery.Header.Candidate.Inverted || recovery.Payload.Candidate.Inverted;
-                anyNormal |= !recovery.Header.Candidate.Inverted || !recovery.Payload.Candidate.Inverted;
+                return;
             }
-            return (anyNormal, anyInverted) switch
-            {
-                (true, false) => "normal",
-                (false, true) => "inverted",
-                (true, true) => "mixed",
-                _ => "not determined"
-            };
+
+            double ratio = PeriodRatio(candidate);
+            text.AppendLine(
+                $"   {prefix} timing: SHORT {FormatTiming(candidate.TimingShortHighMicroseconds)}/" +
+                $"{FormatTiming(candidate.TimingShortLowMicroseconds)} us, LONG " +
+                $"{FormatTiming(candidate.TimingLongHighMicroseconds)}/" +
+                $"{FormatTiming(candidate.TimingLongLowMicroseconds)} us, L/S {FormatRatio(ratio)}");
         }
 
-        private static string FormatRecordPolarity(WavRecoveryInfo recovery)
+        private static string FormatSource(SharpBlockCandidate candidate) =>
+            $"ch {candidate.Channel + 1}, {FormatPulseMode(candidate.PulseMode)}, copy {candidate.CopyIndex + 1}, " +
+            $"{(candidate.Inverted ? "inverted" : "normal")}, checksum {(candidate.ChecksumValid ? "OK" : "bad")}";
+
+        private static string FormatPulseMode(WavPulseMode mode) => mode switch
         {
-            bool header = recovery.Header.Candidate.Inverted;
-            bool payload = recovery.Payload.Candidate.Inverted;
-            if (header == payload)
-            {
-                return header ? "inverted" : "normal";
-            }
-            return $"mixed (header {(header ? "inverted" : "normal")}, " +
-                $"payload {(payload ? "inverted" : "normal")})";
+            WavPulseMode.ZeroCrossing => "zero-cross",
+            WavPulseMode.Schmitt => "Schmitt",
+            _ => mode.ToString()
+        };
+
+        private static double PeriodRatio(SharpBlockCandidate candidate)
+        {
+            double shortPeriod = candidate.TimingShortHighMicroseconds + candidate.TimingShortLowMicroseconds;
+            double longPeriod = candidate.TimingLongHighMicroseconds + candidate.TimingLongLowMicroseconds;
+            return shortPeriod > 0 ? longPeriod / shortPeriod : double.NaN;
         }
+
+        private static string FormatTiming(double value) =>
+            double.IsFinite(value) ? value.ToString("F3") : "n/a";
+
+        private static string FormatRatio(double value) =>
+            double.IsFinite(value) ? value.ToString("F5") : "n/a";
+
+        private static string FormatPercent(double value) =>
+            double.IsFinite(value) ? $"{value * 100.0:F2}%" : "n/a";
+
+        private static string FormatProfileEvidence(SharpProfileEvidence evidence) => evidence switch
+        {
+            SharpProfileEvidence.TurboCopyHeaderAndLoader => "TC header + checksum-valid loader",
+            SharpProfileEvidence.IntercopyHeader => "IC header structure",
+            SharpProfileEvidence.StructuredMz700 => "MZ700 FAST3 loader structure",
+            _ => "timing only"
+        };
 
         internal static string FormatDuration(double durationSeconds)
         {

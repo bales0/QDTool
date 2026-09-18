@@ -67,6 +67,11 @@ namespace QDTool
         private int copyIndex;
         private long physicalHighUnitsTotal;
         private int physicalHighIntervals;
+        private long markLongPhysicalLowUnitsTotal;
+        private int markLongPhysicalLowIntervals;
+        private long markLongPhysicalHighUnitsTotal;
+        private int markLongPhysicalHighIntervals;
+        private bool expectMarkLongPhysicalHigh;
         private double leaderMean;
         private double leaderM2;
         private int leaderObservationCount;
@@ -75,12 +80,26 @@ namespace QDTool
         private readonly byte[] headerBuffer = new byte[HeaderBytes];
         private byte[]? validatedHeader;
         private long validatedShortX8;
+        private long validatedLeaderPhysicalLowMeanX8;
         private long validatedPhysicalHighX8;
+        private long validatedLongPhysicalLowX8;
+        private long validatedLongPhysicalHighX8;
+        private long completedLeaderPhysicalLowMeanX8;
+        private long completedShortPhysicalHighX8;
+        private long completedLongPhysicalLowX8;
+        private long completedLongPhysicalHighX8;
         private SharpMzDecoderEvent? pendingEvent;
 
         internal byte[]? ValidatedHeader => validatedHeader;
         internal long HeaderShortPhysicalLowX8 => validatedShortX8;
+        internal long HeaderLeaderPhysicalLowMeanX8 => validatedLeaderPhysicalLowMeanX8;
         internal long HeaderShortPhysicalHighX8 => validatedPhysicalHighX8;
+        internal long HeaderLongPhysicalLowX8 => validatedLongPhysicalLowX8;
+        internal long HeaderLongPhysicalHighX8 => validatedLongPhysicalHighX8;
+        internal long CompletedLeaderPhysicalLowMeanX8 => completedLeaderPhysicalLowMeanX8;
+        internal long CompletedShortPhysicalHighX8 => completedShortPhysicalHighX8;
+        internal long CompletedLongPhysicalLowX8 => completedLongPhysicalLowX8;
+        internal long CompletedLongPhysicalHighX8 => completedLongPhysicalHighX8;
         internal double LeaderAverage => leaderMean;
         internal double LeaderStdDev => leaderObservationCount > 1
             ? Math.Sqrt(leaderM2 / (leaderObservationCount - 1))
@@ -94,7 +113,11 @@ namespace QDTool
             mode = DecoderMode.Header;
             validatedHeader = null;
             validatedShortX8 = 0;
+            validatedLeaderPhysicalLowMeanX8 = 0;
             validatedPhysicalHighX8 = 0;
+            validatedLongPhysicalLowX8 = 0;
+            validatedLongPhysicalHighX8 = 0;
+            ClearCompletedTiming();
             pendingEvent = null;
             expectedBytes = HeaderBytes;
             ResetDecoder(0);
@@ -136,6 +159,7 @@ namespace QDTool
             }
 
             mode = DecoderMode.Data;
+            ClearCompletedTiming();
             pendingEvent = null;
             expectedBytes = byteCount;
             ResetDecoder(0);
@@ -176,6 +200,7 @@ namespace QDTool
             if (physicalHigh)
             {
                 TrackLeaderPhysicalHigh(durationUnits);
+                TrackMarkLongPhysicalHigh(durationUnits);
                 return false;
             }
 
@@ -211,6 +236,11 @@ namespace QDTool
             copyIndex = 0;
             physicalHighUnitsTotal = 0;
             physicalHighIntervals = 0;
+            markLongPhysicalLowUnitsTotal = 0;
+            markLongPhysicalLowIntervals = 0;
+            markLongPhysicalHighUnitsTotal = 0;
+            markLongPhysicalHighIntervals = 0;
+            expectMarkLongPhysicalHigh = false;
             leaderMean = 0;
             leaderM2 = 0;
             leaderObservationCount = 0;
@@ -345,6 +375,7 @@ namespace QDTool
                 RecordClassification(pulseClass);
                 if (leaderPulses >= MinLeaderPulses && pulseClass == 1)
                 {
+                    ObserveMarkLongPhysicalLow(durationUnits);
                     state = DecodeState.MarkLong;
                     markPulses = 1;
                     return;
@@ -366,6 +397,7 @@ namespace QDTool
             {
                 if (classified == 1)
                 {
+                    ObserveMarkLongPhysicalLow(durationUnits);
                     if (markPulses < byte.MaxValue)
                     {
                         markPulses++;
@@ -467,16 +499,17 @@ namespace QDTool
             }
 
             bool valid = recordedChecksum == checksum;
+            CaptureCompletedTiming();
             if (mode == DecoderMode.Header)
             {
                 if (valid)
                 {
                     validatedHeader = (byte[])headerBuffer.Clone();
                     validatedShortX8 = shortX8;
-                    validatedPhysicalHighX8 = physicalHighIntervals == 0
-                        ? 0
-                        : ((physicalHighUnitsTotal * 8) + (physicalHighIntervals / 2)) /
-                            physicalHighIntervals;
+                    validatedLeaderPhysicalLowMeanX8 = completedLeaderPhysicalLowMeanX8;
+                    validatedPhysicalHighX8 = completedShortPhysicalHighX8;
+                    validatedLongPhysicalLowX8 = completedLongPhysicalLowX8;
+                    validatedLongPhysicalHighX8 = completedLongPhysicalHighX8;
                     mode = DecoderMode.Stopped;
                     PublishEvent(SharpMzDecoderEventType.HeaderValid, 0, 0);
                 }
@@ -520,6 +553,59 @@ namespace QDTool
                 recordedChecksum,
                 leaderPulses,
                 copyIndex);
+        }
+
+        private void ClearCompletedTiming()
+        {
+            completedLeaderPhysicalLowMeanX8 = 0;
+            completedShortPhysicalHighX8 = 0;
+            completedLongPhysicalLowX8 = 0;
+            completedLongPhysicalHighX8 = 0;
+        }
+
+        private void CaptureCompletedTiming()
+        {
+            completedLeaderPhysicalLowMeanX8 = leaderObservationCount == 0
+                ? 0
+                : checked((long)Math.Round(leaderMean * 8.0));
+            completedShortPhysicalHighX8 = physicalHighIntervals == 0
+                ? 0
+                : ((physicalHighUnitsTotal * 8) + (physicalHighIntervals / 2)) /
+                    physicalHighIntervals;
+            completedLongPhysicalLowX8 = markLongPhysicalLowIntervals == 0
+                ? 0
+                : ((markLongPhysicalLowUnitsTotal * 8) + (markLongPhysicalLowIntervals / 2)) /
+                    markLongPhysicalLowIntervals;
+            completedLongPhysicalHighX8 = markLongPhysicalHighIntervals == 0
+                ? 0
+                : ((markLongPhysicalHighUnitsTotal * 8) + (markLongPhysicalHighIntervals / 2)) /
+                    markLongPhysicalHighIntervals;
+        }
+
+        private void ObserveMarkLongPhysicalLow(long durationUnits)
+        {
+            if (markLongPhysicalLowIntervals == int.MaxValue)
+            {
+                return;
+            }
+            markLongPhysicalLowUnitsTotal = checked(markLongPhysicalLowUnitsTotal + durationUnits);
+            markLongPhysicalLowIntervals++;
+            expectMarkLongPhysicalHigh = true;
+        }
+
+        private void TrackMarkLongPhysicalHigh(long durationUnits)
+        {
+            if (!expectMarkLongPhysicalHigh)
+            {
+                return;
+            }
+            expectMarkLongPhysicalHigh = false;
+            if (markLongPhysicalHighIntervals == int.MaxValue)
+            {
+                return;
+            }
+            markLongPhysicalHighUnitsTotal = checked(markLongPhysicalHighUnitsTotal + durationUnits);
+            markLongPhysicalHighIntervals++;
         }
 
         private void TrackLeaderPhysicalHigh(long durationUnits)
