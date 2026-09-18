@@ -825,7 +825,6 @@ namespace QDTool
         {
             private readonly BinaryWriter writer;
             private readonly int unitMicroseconds;
-            private double quantizationError;
 
             public EdgeDurationSink(Stream stream, int unitMicroseconds)
             {
@@ -837,9 +836,12 @@ namespace QDTool
                 bool physicalHigh,
                 double durationMicroseconds)
             {
-                double exactUnits = ((double)durationMicroseconds / unitMicroseconds) + quantizationError;
+                // LEP/L16 stores edge durations, not sampled waveform positions.
+                // Quantize every physical run independently so its stored width
+                // cannot depend on the rounding error of preceding runs.
+                // WAV keeps its separate sample-phase error accumulator below.
+                double exactUnits = (double)durationMicroseconds / unitMicroseconds;
                 int units = Math.Max(1, (int)Math.Round(exactUnits, MidpointRounding.AwayFromZero));
-                quantizationError = exactUnits - units;
 
                 if (units > 127)
                 {
