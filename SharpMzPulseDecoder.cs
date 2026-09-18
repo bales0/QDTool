@@ -7,6 +7,7 @@ namespace QDTool
     {
         None,
         HeaderValid,
+        HeaderInvalid,
         DataByte,
         BlockValid,
         BlockInvalid
@@ -66,6 +67,11 @@ namespace QDTool
         private int copyIndex;
         private long physicalHighUnitsTotal;
         private int physicalHighIntervals;
+        private double leaderMean;
+        private double leaderM2;
+        private int leaderObservationCount;
+        private int classifiedPulses;
+        private int unclassifiedPulses;
         private readonly byte[] headerBuffer = new byte[HeaderBytes];
         private byte[]? validatedHeader;
         private long validatedShortX8;
@@ -75,6 +81,13 @@ namespace QDTool
         internal byte[]? ValidatedHeader => validatedHeader;
         internal long HeaderShortPhysicalLowX8 => validatedShortX8;
         internal long HeaderShortPhysicalHighX8 => validatedPhysicalHighX8;
+        internal double LeaderAverage => leaderMean;
+        internal double LeaderStdDev => leaderObservationCount > 1
+            ? Math.Sqrt(leaderM2 / (leaderObservationCount - 1))
+            : 0;
+        internal double PulseConfidence => classifiedPulses + unclassifiedPulses == 0
+            ? 0
+            : (double)classifiedPulses / (classifiedPulses + unclassifiedPulses);
 
         internal void BeginHeader()
         {
@@ -112,6 +125,20 @@ namespace QDTool
             mode = DecoderMode.Data;
             pendingEvent = null;
             BeginDuplicateGap(byteCount);
+        }
+
+        internal void BeginRawBlock(int byteCount)
+        {
+            if (byteCount is < 0 or > ushort.MaxValue)
+            {
+                Stop();
+                return;
+            }
+
+            mode = DecoderMode.Data;
+            pendingEvent = null;
+            expectedBytes = byteCount;
+            ResetDecoder(0);
         }
 
         internal void BreakSignal()
@@ -184,6 +211,15 @@ namespace QDTool
             copyIndex = 0;
             physicalHighUnitsTotal = 0;
             physicalHighIntervals = 0;
+            leaderMean = 0;
+            leaderM2 = 0;
+            leaderObservationCount = 0;
+            classifiedPulses = 0;
+            unclassifiedPulses = 0;
+            if (seedUnits > 0)
+            {
+                ObserveLeader(seedUnits);
+            }
         }
 
         private bool AcceptLeaderPulse(long durationUnits)
@@ -204,6 +240,7 @@ namespace QDTool
             shortX8 = scaled >= shortX8
                 ? shortX8 + ((difference + 4) >> 3)
                 : shortX8 - ((difference + 3) >> 3);
+            ObserveLeader(durationUnits);
             return true;
         }
 
@@ -248,6 +285,7 @@ namespace QDTool
             if (state == DecodeState.DuplicateGap)
             {
                 int pulseClass = ClassifyPulse(durationUnits);
+                RecordClassification(pulseClass);
                 if (pulseClass == 0)
                 {
                     if (leaderPulses < 256)
@@ -304,6 +342,7 @@ namespace QDTool
                 }
 
                 int pulseClass = ClassifyPulse(durationUnits);
+                RecordClassification(pulseClass);
                 if (leaderPulses >= MinLeaderPulses && pulseClass == 1)
                 {
                     state = DecodeState.MarkLong;
@@ -316,6 +355,7 @@ namespace QDTool
             }
 
             int classified = ClassifyPulse(durationUnits);
+            RecordClassification(classified);
             if (classified < 0)
             {
                 ResetDecoder(durationUnits);
@@ -442,6 +482,7 @@ namespace QDTool
                 }
                 else
                 {
+                    PublishEvent(SharpMzDecoderEventType.HeaderInvalid, 0, 0);
                     BeginDuplicateGap(HeaderBytes);
                 }
                 return;
@@ -495,5 +536,26 @@ namespace QDTool
             physicalHighUnitsTotal = checked(physicalHighUnitsTotal + durationUnits);
             physicalHighIntervals++;
         }
+
+        private void ObserveLeader(long durationUnits)
+        {
+            leaderObservationCount++;
+            double delta = durationUnits - leaderMean;
+            leaderMean += delta / leaderObservationCount;
+            leaderM2 += delta * (durationUnits - leaderMean);
+        }
+
+        private void RecordClassification(int pulseClass)
+        {
+            if (pulseClass < 0)
+            {
+                unclassifiedPulses++;
+            }
+            else
+            {
+                classifiedPulses++;
+            }
+        }
+
     }
 }

@@ -14,4 +14,9 @@
     <Compile Remove="QDTool.Tests\**\*.cs" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="NAudio.SoundFile" Version="3.1.0" />
+    <PackageReference Include="org.sndfile.runtime.win-x64" Version="1.2.2" />
+  </ItemGroup>
+
 </Project>

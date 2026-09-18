@@ -95,7 +95,7 @@ namespace QDTool
     internal static class FeatureModePolicy
     {
         public static string GetOpenFilter(bool advanced) => advanced
-            ? "All supported files|*.mzt;*.mzf;*.mzq;*.qdf;*.qd;*.lep;*.l16;*.wav|Quickdisk image (*.qd)|*.qd|Quickdisk file (*.mzq)|*.mzq|Multiple files tape (*.mzt)|*.mzt|Single tape file (*.mzf)|*.mzf|Quickdisk file (*.qdf)|*.qdf|LEP pulse file (*.lep)|*.lep|L16 pulse file (*.l16)|*.l16|Wave audio (*.wav)|*.wav|All files (*.*)|*.*"
+            ? "All supported files|*.mzt;*.mzf;*.mzq;*.qdf;*.qd;*.lep;*.l16;*.wav;*.flac|Quickdisk image (*.qd)|*.qd|Quickdisk file (*.mzq)|*.mzq|Multiple files tape (*.mzt)|*.mzt|Single tape file (*.mzf)|*.mzf|Quickdisk file (*.qdf)|*.qdf|LEP pulse file (*.lep)|*.lep|L16 pulse file (*.l16)|*.l16|Wave audio (*.wav)|*.wav|FLAC audio (*.flac)|*.flac|All files (*.*)|*.*"
             : "All supported files|*.mzt;*.mzf;*.mzq;*.qdf|Quickdisk file (*.mzq)|*.mzq|Multiple files tape (*.mzt)|*.mzt|Single tape file (*.mzf)|*.mzf|Quickdisk file (*.qdf)|*.qdf|All files (*.*)|*.*";
 
         public static string GetSaveFilter(bool advanced) => advanced
@@ -975,6 +975,17 @@ namespace QDTool
         private bool AddFile(string filePath, bool bindAsCurrent = false)
         {
             string fileExtension = System.IO.Path.GetExtension(filePath).ToLowerInvariant();
+            WavImportMode wavImportMode = WavImportMode.Standard;
+            if (AdvancedFeaturesEnabled && fileExtension is ".wav" or ".flac")
+            {
+                string sourceFormat = fileExtension == ".flac" ? "FLAC" : "WAV";
+                var options = new WavImportOptionsWindow(sourceFormat) { Owner = this };
+                if (options.ShowDialog() != true)
+                {
+                    return false;
+                }
+                wavImportMode = options.ImportMode;
+            }
             var recordsToAdd = new List<TapeRecord>();
             byte[] containerTrailing = Array.Empty<byte>();
             string? loadedSidecar = null;
@@ -1017,9 +1028,35 @@ namespace QDTool
                     containerTrailing = result.ContainerTrailingData;
                     loadedSidecar = SidecarService.LoadForMzt(filePath, recordsToAdd);
                 }
-                else if (AdvancedFeaturesEnabled && fileExtension is ".wav" or ".lep" or ".l16")
+                else if (AdvancedFeaturesEnabled && fileExtension is ".wav" or ".flac" or ".lep" or ".l16")
                 {
-                    recordsToAdd.AddRange(SharpTapeImporter.ReadFile(filePath));
+                    if ((fileExtension is ".wav" or ".flac") &&
+                        wavImportMode == WavImportMode.Heuristic)
+                    {
+                        var progressWindow = new WavAnalysisProgressWindow(filePath) { Owner = this };
+                        bool? analysisAccepted = progressWindow.ShowDialog();
+                        if (progressWindow.AnalysisError != null)
+                        {
+                            throw new InvalidDataException(
+                                $"Heuristic audio analysis failed: {progressWindow.AnalysisError.Message}",
+                                progressWindow.AnalysisError);
+                        }
+                        if (analysisAccepted != true || progressWindow.AnalysisResult == null)
+                        {
+                            return false;
+                        }
+
+                        WavHeuristicAnalysisResult analysis = progressWindow.AnalysisResult;
+                        recordsToAdd.AddRange(analysis.Records);
+                        new WavAnalysisStatisticsWindow(analysis.Statistics)
+                        {
+                            Owner = this
+                        }.ShowDialog();
+                    }
+                    else
+                    {
+                        recordsToAdd.AddRange(SharpTapeImporter.ReadFile(filePath));
+                    }
                     format = recordsToAdd.Count == 1 ? TapeDocumentFormat.Mzf : TapeDocumentFormat.Mzt;
                 }
                 else

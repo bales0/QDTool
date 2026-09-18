@@ -978,6 +978,7 @@ namespace QDTool
                 ".lep" => ReadEdgeRuns(File.ReadAllBytes(filePath), TapeSignalFormat.Lep),
                 ".l16" => ReadEdgeRuns(File.ReadAllBytes(filePath), TapeSignalFormat.L16),
                 ".wav" => ReadWavRuns(File.ReadAllBytes(filePath)),
+                ".flac" => ReadFlacRuns(filePath),
                 _ => throw new ArgumentException($"Unsupported tape input extension: {extension}", nameof(filePath))
             };
             return DecodeRecords(source);
@@ -1137,7 +1138,7 @@ namespace QDTool
             new($"Tape checksum mismatch: expected {decoderEvent.CalculatedChecksum:X4}, " +
                 $"found {decoderEvent.RecordedChecksum:X4}.");
 
-        private static bool TryRecoverIntercopyHeader(
+        internal static bool TryRecoverIntercopyHeader(
             byte[] encoded,
             out byte[]? recovered,
             out TapeProfile profile)
@@ -1200,7 +1201,7 @@ namespace QDTool
             return recovered;
         }
 
-        private static bool TryRecoverMz700FastHeader(byte[] encoded, out byte[]? recovered)
+        internal static bool TryRecoverMz700FastHeader(byte[] encoded, out byte[]? recovered)
         {
             recovered = null;
             if (encoded[0] != 0x01 ||
@@ -1313,6 +1314,17 @@ namespace QDTool
                 ? TapeProfile.Mz700_1_1
                 : TapeProfile.Normal1_1;
         }
+
+        internal static TapeProfile ProfileFromWavTone(
+            long shortPhysicalLowX8,
+            long shortPhysicalHighX8,
+            int leaderPulses,
+            uint sampleRate) =>
+            ProfileFromTone(
+                shortPhysicalLowX8,
+                shortPhysicalHighX8,
+                leaderPulses,
+                new TapeSignalSource(Array.Empty<SignalRun>(), TapeSignalFormat.Wav, sampleRate));
 
         private static long NormalizeShortX8(long shortX8, TapeSignalSource source) =>
             source.Format switch
@@ -1443,6 +1455,52 @@ namespace QDTool
                 AddRun(runs, level.Value, samples);
             }
             return new TapeSignalSource(runs, TapeSignalFormat.Wav, sampleRate);
+        }
+
+        private static TapeSignalSource ReadFlacRuns(string filePath)
+        {
+            using var reader = new FlacPcmStreamReader(filePath);
+            var runs = new List<SignalRun>();
+            bool? level = null;
+            long samples = 0;
+            bool digital8BitLevel = false;
+            reader.ReadFrames((_, left, _) =>
+            {
+                bool current;
+                if (reader.Format.BitsPerSample == 8)
+                {
+                    if (!digital8BitLevel && left >= 1769472)
+                    {
+                        digital8BitLevel = true;
+                    }
+                    else if (digital8BitLevel && left <= -1835008)
+                    {
+                        digital8BitLevel = false;
+                    }
+                    current = digital8BitLevel;
+                }
+                else
+                {
+                    current = left >= 0;
+                }
+
+                if (level == current)
+                {
+                    samples++;
+                    return;
+                }
+                if (level.HasValue)
+                {
+                    AddRun(runs, level.Value, samples);
+                }
+                level = current;
+                samples = 1;
+            });
+            if (level.HasValue)
+            {
+                AddRun(runs, level.Value, samples);
+            }
+            return new TapeSignalSource(runs, TapeSignalFormat.Wav, reader.Format.SampleRate);
         }
 
         private static void AddRun(List<SignalRun> runs, bool physicalHigh, long durationUnits)
