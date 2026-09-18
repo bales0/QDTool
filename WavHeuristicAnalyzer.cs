@@ -183,7 +183,6 @@ namespace QDTool
         internal required int ResultRecords { get; init; }
         internal required int ReconstructedRecords { get; init; }
         internal required bool SelectiveRecoveryUsed { get; init; }
-        internal required bool SelectedInverted { get; init; }
         internal required IReadOnlyList<WavRecoveryInfo> RecordRecoveries { get; init; }
         internal double DurationSeconds => Format.FrameCount / (double)Format.SampleRate;
     }
@@ -255,7 +254,6 @@ namespace QDTool
                 channel.Flush(reader.Format.FrameCount);
             }
 
-            bool selectedInverted = SelectGlobalPolarity(candidates, reader.Format.SampleRate);
             bool selectiveRecoveryUsed = false;
             IReadOnlyList<TapeRecord> records;
             IReadOnlyList<WavRecoveryInfo> recordRecoveries;
@@ -271,21 +269,19 @@ namespace QDTool
                 records = AssembleRecords(
                     candidates,
                     reader.Format.SampleRate,
-                    selectedInverted,
                     out reconstructedRecords,
                     out recordRecoveries);
             }
             catch (InvalidDataException) when (
-                candidates.Any(value => value.Inverted == selectedInverted &&
+                candidates.Any(value =>
                     value.Kind == SharpBlockKind.Header && value.ChecksumValid) &&
-                candidates.Any(value => value.Inverted == selectedInverted &&
+                candidates.Any(value =>
                     value.Kind == SharpBlockKind.Payload && !value.ChecksumValid))
             {
                 selectiveRecoveryUsed = true;
                 records = SelectiveRecovery(
                     reader,
                     candidates,
-                    selectedInverted,
                     progress,
                     cancellationToken,
                     out reconstructedRecords,
@@ -312,7 +308,6 @@ namespace QDTool
                     ResultRecords = records.Count,
                     ReconstructedRecords = reconstructedRecords,
                     SelectiveRecoveryUsed = selectiveRecoveryUsed,
-                    SelectedInverted = selectedInverted,
                     RecordRecoveries = recordRecoveries
                 }
             };
@@ -321,15 +316,13 @@ namespace QDTool
         private static IReadOnlyList<TapeRecord> SelectiveRecovery(
             IPcmAudioStreamReader reader,
             List<SharpBlockCandidate> discoveryCandidates,
-            bool selectedInverted,
             IProgress<WavAnalysisProgress>? progress,
             CancellationToken cancellationToken,
             out int reconstructedRecords,
             out IReadOnlyList<WavRecoveryInfo> recordRecoveries)
         {
             List<SharpBlockCandidate> failures = discoveryCandidates
-                .Where(value => value.Inverted == selectedInverted &&
-                    value.Kind == SharpBlockKind.Payload && !value.ChecksumValid)
+                .Where(value => value.Kind == SharpBlockKind.Payload && !value.ChecksumValid)
                 .ToList();
             long context = reader.Format.SampleRate * 3L;
             long firstFrame = Math.Max(0, failures.Min(value => value.StartSample) - context);
@@ -337,8 +330,7 @@ namespace QDTool
                 reader.Format.FrameCount,
                 failures.Max(value => value.EndSample) + context);
             var expectedLengths = discoveryCandidates
-                .Where(value => value.Inverted == selectedInverted &&
-                    value.Kind == SharpBlockKind.Header && value.ChecksumValid)
+                .Where(value => value.Kind == SharpBlockKind.Header && value.ChecksumValid)
                 .Select(value => (int)BinaryPrimitives.ReadUInt16LittleEndian(value.Data.AsSpan(18, 2)))
                 .Concat(failures.Select(value => value.Data.Length))
                 .Where(value => value > 0)
@@ -378,187 +370,24 @@ namespace QDTool
             return AssembleRecords(
                 discoveryCandidates,
                 reader.Format.SampleRate,
-                selectedInverted,
                 out reconstructedRecords,
                 out recordRecoveries);
-        }
-
-        private readonly record struct PolarityAssessment(
-            bool Inverted,
-            int HeaderGroups,
-            int StructuralHeaderGroups,
-            int ValidPayloadGroups,
-            double MeanTimingError,
-            double MeanPulseConfidence);
-
-        private static bool SelectGlobalPolarity(
-            List<SharpBlockCandidate> candidates,
-            uint sampleRate)
-        {
-            PolarityAssessment normal = AssessPolarity(candidates, sampleRate, inverted: false);
-            PolarityAssessment inverted = AssessPolarity(candidates, sampleRate, inverted: true);
-
-            if (normal.HeaderGroups != inverted.HeaderGroups)
-            {
-                return inverted.HeaderGroups > normal.HeaderGroups;
-            }
-            if (normal.StructuralHeaderGroups != inverted.StructuralHeaderGroups)
-            {
-                return inverted.StructuralHeaderGroups > normal.StructuralHeaderGroups;
-            }
-            if (normal.ValidPayloadGroups != inverted.ValidPayloadGroups)
-            {
-                return inverted.ValidPayloadGroups > normal.ValidPayloadGroups;
-            }
-
-            bool normalTiming = double.IsFinite(normal.MeanTimingError);
-            bool invertedTiming = double.IsFinite(inverted.MeanTimingError);
-            if (normalTiming != invertedTiming)
-            {
-                return invertedTiming;
-            }
-            if (normalTiming &&
-                Math.Abs(normal.MeanTimingError - inverted.MeanTimingError) >= 0.00075)
-            {
-                return inverted.MeanTimingError < normal.MeanTimingError;
-            }
-            if (Math.Abs(normal.MeanPulseConfidence - inverted.MeanPulseConfidence) >= 0.02)
-            {
-                return inverted.MeanPulseConfidence > normal.MeanPulseConfidence;
-            }
-
-            // A single analogue recording has one electrical polarity. If both
-            // interpretations are genuinely indistinguishable, keep the ordinary
-            // non-inverted interpretation rather than mixing polarity per block.
-            return false;
-        }
-
-        private static PolarityAssessment AssessPolarity(
-            List<SharpBlockCandidate> candidates,
-            uint sampleRate,
-            bool inverted)
-        {
-            long tolerance = Math.Max(1L, sampleRate / 2L);
-            List<SharpBlockCandidate> headers = candidates
-                .Where(candidate => candidate.Inverted == inverted &&
-                    candidate.Kind == SharpBlockKind.Header && candidate.ChecksumValid)
-                .OrderBy(candidate => candidate.EndSample)
-                .ToList();
-
-            var groups = new List<List<SharpBlockCandidate>>();
-            foreach (SharpBlockCandidate header in headers)
-            {
-                List<SharpBlockCandidate>? group = groups.LastOrDefault();
-                if (group == null || header.EndSample - group[^1].EndSample > tolerance)
-                {
-                    group = [];
-                    groups.Add(group);
-                }
-                group.Add(header);
-            }
-
-            var representatives = new List<SharpBlockCandidate>(groups.Count);
-            int structural = 0;
-            foreach (List<SharpBlockCandidate> group in groups)
-            {
-                SharpBlockCandidate representative = group
-                    .OrderByDescending(candidate => ProfileEvidenceRank(candidate.ProfileEvidence))
-                    .ThenByDescending(candidate => candidate.PulseMode == WavPulseMode.ZeroCrossing)
-                    .ThenBy(candidate => GetPolarityTimingError(candidate))
-                    .ThenByDescending(Score)
-                    .First();
-                representatives.Add(representative);
-                if (representative.ProfileEvidence != SharpProfileEvidence.TimingOnly)
-                {
-                    structural++;
-                }
-            }
-
-            int validPayloadGroups = 0;
-            long previousStart = long.MinValue;
-            int previousLength = -1;
-            foreach (SharpBlockCandidate payload in candidates
-                .Where(candidate => candidate.Inverted == inverted &&
-                    candidate.Kind == SharpBlockKind.Payload && candidate.ChecksumValid)
-                .OrderBy(candidate => candidate.StartSample)
-                .ThenBy(candidate => candidate.Data.Length))
-            {
-                if (previousStart == long.MinValue ||
-                    payload.Data.Length != previousLength ||
-                    payload.StartSample - previousStart > tolerance)
-                {
-                    validPayloadGroups++;
-                    previousStart = payload.StartSample;
-                    previousLength = payload.Data.Length;
-                }
-            }
-
-            double[] errors = representatives
-                .Select(GetPolarityTimingError)
-                .Where(double.IsFinite)
-                .ToArray();
-            double meanError = errors.Length == 0
-                ? double.PositiveInfinity
-                : errors.Average();
-            double meanConfidence = representatives.Count == 0
-                ? 0
-                : representatives.Average(candidate => candidate.PulseConfidence);
-
-            return new PolarityAssessment(
-                inverted,
-                groups.Count,
-                structural,
-                validPayloadGroups,
-                meanError,
-                meanConfidence);
-        }
-
-        private static double GetPolarityTimingError(SharpBlockCandidate candidate)
-        {
-            if (!HasCompleteTiming(candidate))
-            {
-                return double.PositiveInfinity;
-            }
-
-            if (candidate.ProfileEvidence is SharpProfileEvidence.IntercopyHeader or
-                SharpProfileEvidence.TurboCopyHeaderAndLoader)
-            {
-                return FitCandidateTiming(SharpZ80TimingTable.Rom800Normal, candidate).RelativeError;
-            }
-            if (candidate.ProfileEvidence == SharpProfileEvidence.StructuredMz700)
-            {
-                return FitCandidateTiming(SharpZ80TimingTable.Mz700Normal, candidate).RelativeError;
-            }
-
-            return candidate.Profile switch
-            {
-                TapeProfile.Normal1_2 => FitCandidateTiming(SharpZ80TimingTable.Normal1_2, candidate).RelativeError,
-                TapeProfile.Normal1_3 => FitCandidateTiming(SharpZ80TimingTable.Normal1_3, candidate).RelativeError,
-                TapeProfile.Normal1_4 => FitCandidateTiming(SharpZ80TimingTable.Normal1_4, candidate).RelativeError,
-                TapeProfile.Mz700_1_1 => FitCandidateTiming(SharpZ80TimingTable.Mz700Normal, candidate).RelativeError,
-                _ => Math.Min(
-                    FitCandidateTiming(SharpZ80TimingTable.Rom800Normal, candidate).RelativeError,
-                    FitCandidateTiming(SharpZ80TimingTable.Mz700Normal, candidate).RelativeError)
-            };
         }
 
         private static IReadOnlyList<TapeRecord> AssembleRecords(
             List<SharpBlockCandidate> candidates,
             uint sampleRate,
-            bool selectedInverted,
             out int reconstructedRecords,
             out IReadOnlyList<WavRecoveryInfo> recordRecoveries)
         {
             reconstructedRecords = 0;
             var recoveries = new List<WavRecoveryInfo>();
             List<SharpBlockCandidate> headers = candidates
-                .Where(value => value.Inverted == selectedInverted &&
-                    value.Kind == SharpBlockKind.Header && value.ChecksumValid)
+                .Where(value => value.Kind == SharpBlockKind.Header && value.ChecksumValid)
                 .OrderBy(value => value.EndSample)
                 .ToList();
             List<SharpBlockCandidate> payloads = candidates
-                .Where(value => value.Inverted == selectedInverted &&
-                    value.Kind == SharpBlockKind.Payload)
+                .Where(value => value.Kind == SharpBlockKind.Payload)
                 .OrderBy(value => value.StartSample)
                 .ToList();
 
@@ -624,6 +453,7 @@ namespace QDTool
                     : long.MaxValue;
                 List<SharpBlockCandidate> matchingPayloads = payloads
                     .Where(value => value.Data.Length == expectedLength &&
+                        value.Inverted == header.Inverted &&
                         value.StartSample >= afterHeader && value.StartSample < beforeNextHeader)
                     .ToList();
                 if (matchingPayloads.Count == 0)
@@ -633,8 +463,7 @@ namespace QDTool
 
                 SharpBlockCandidate? payload = matchingPayloads
                     .Where(value => value.ChecksumValid)
-                    .OrderByDescending(value => value.Inverted == header.Inverted)
-                    .ThenByDescending(value => value.Channel == header.Channel)
+                    .OrderByDescending(value => value.Channel == header.Channel)
                     .ThenByDescending(Score)
                     .FirstOrDefault();
                 bool reconstructed = false;
@@ -662,7 +491,6 @@ namespace QDTool
                         candidates,
                         header,
                         payload,
-                        selectedInverted,
                         sampleRate);
                     finalProfile = native1xAnalysis.Value.ResultProfile;
                 }
@@ -699,18 +527,15 @@ namespace QDTool
             List<SharpBlockCandidate> allCandidates,
             SharpBlockCandidate selectedHeader,
             SharpBlockCandidate selectedPayload,
-            bool selectedInverted,
             uint sampleRate)
         {
             SharpBlockCandidate header = FindBestTimingCandidate(
                 allCandidates,
                 selectedHeader,
-                selectedInverted,
                 sampleRate);
             SharpBlockCandidate payload = FindBestTimingCandidate(
                 allCandidates,
                 selectedPayload,
-                selectedInverted,
                 sampleRate);
 
             SharpTimingMatch header800 = FitCandidateTiming(SharpZ80TimingTable.Rom800Normal, header);
@@ -760,13 +585,12 @@ namespace QDTool
         private static SharpBlockCandidate FindBestTimingCandidate(
             List<SharpBlockCandidate> candidates,
             SharpBlockCandidate selected,
-            bool selectedInverted,
             uint sampleRate)
         {
             long tolerance = Math.Max(1L, sampleRate / 2L);
             IEnumerable<SharpBlockCandidate> matching = candidates.Where(candidate =>
                 candidate.Kind == selected.Kind &&
-                candidate.Inverted == selectedInverted &&
+                candidate.Inverted == selected.Inverted &&
                 candidate.ChecksumValid &&
                 candidate.Data.Length == selected.Data.Length &&
                 candidate.Data.AsSpan().SequenceEqual(selected.Data) &&
@@ -802,7 +626,7 @@ namespace QDTool
         private static SharpTimingMatch FitCandidateTiming(
             SharpZ80TimingReference reference,
             SharpBlockCandidate candidate) =>
-            FitTiming(
+            SharpTapeCandidateScanner.FitTiming(
                 reference,
                 candidate.TimingShortHighMicroseconds,
                 candidate.TimingShortLowMicroseconds,
@@ -1469,7 +1293,7 @@ namespace QDTool
                 bestNative.LongLowMicroseconds);
         }
 
-        private static SharpTimingMatch FitTiming(
+        internal static SharpTimingMatch FitTiming(
             SharpZ80TimingReference reference,
             double shortHigh,
             double shortLow,

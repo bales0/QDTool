@@ -1019,6 +1019,7 @@ namespace QDTool
                         profile = ProfileFromTone(
                             decoder.HeaderShortPhysicalLowX8,
                             decoder.HeaderShortPhysicalHighX8,
+                            decoder.HeaderLongPhysicalLowX8,
                             decoderEvent.LeaderPulses,
                             source);
                         pendingStage = PendingStage.Body;
@@ -1275,6 +1276,7 @@ namespace QDTool
         private static TapeProfile ProfileFromTone(
             long shortPhysicalLowX8,
             long shortPhysicalHighX8,
+            long longPhysicalLowX8,
             int leaderPulses,
             TapeSignalSource source)
         {
@@ -1284,6 +1286,23 @@ namespace QDTool
             long d3 = Math.Abs(normalized - 44);
             long d4 = Math.Abs(normalized - 39);
             long normalizedHigh = NormalizeShortX8(shortPhysicalHighX8, source);
+            long normalizedLongLow = NormalizeShortX8(longPhysicalLowX8, source);
+
+            // LEP's 50 us units quantize the physical-LOW short half-wave of
+            // NORMAL 1:2, 1:3 and 1:4 to the same two-unit value. Use the
+            // independently measured HIGH short half-wave to identify 1:2,
+            // then the LOW long half-wave to distinguish 1:3 from 1:4.
+            if (source.Format == TapeSignalFormat.Lep && normalizedLongLow > 0 &&
+                d3 <= d2 && d3 < d1)
+            {
+                if (normalizedHigh >= 63)
+                {
+                    return TapeProfile.Normal1_2;
+                }
+                return normalizedLongLow >= 88
+                    ? TapeProfile.Normal1_3
+                    : TapeProfile.Normal1_4;
+            }
 
             if (leaderPulses is >= 8000 and <= 13000 &&
                 d4 < d3 && d4 < d2 && d4 < d1)
@@ -1323,6 +1342,7 @@ namespace QDTool
             ProfileFromTone(
                 shortPhysicalLowX8,
                 shortPhysicalHighX8,
+                0,
                 leaderPulses,
                 new TapeSignalSource(Array.Empty<SignalRun>(), TapeSignalFormat.Wav, sampleRate));
 

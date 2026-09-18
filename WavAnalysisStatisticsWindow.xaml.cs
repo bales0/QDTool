@@ -9,6 +9,10 @@ namespace QDTool
         internal WavAnalysisStatisticsWindow(WavHeuristicStatistics statistics)
         {
             InitializeComponent();
+            MaxWidth = Math.Max(MinWidth, SystemParameters.WorkArea.Width - 32);
+            MaxHeight = Math.Max(MinHeight, SystemParameters.WorkArea.Height - 32);
+            Width = Math.Min(Width, MaxWidth);
+            Height = Math.Min(Height, MaxHeight);
             statisticsText.Text = BuildText(statistics);
         }
 
@@ -21,9 +25,7 @@ namespace QDTool
             text.AppendLine(
                 $"Format: {format.SampleRate:N0} Hz / {format.BitsPerSample} bit / " +
                 $"{format.Channels} channel(s) / {format.FrameCount:N0} frames");
-            text.AppendLine(
-                $"Signal polarity: {(statistics.SelectedInverted ? "inverted" : "normal")} " +
-                "(one global polarity used for the whole recording)");
+            text.AppendLine("Signal polarity: detected independently for each record");
             text.AppendLine();
             text.AppendLine(
                 $"Candidates: header {statistics.HeaderCandidates:N0}, payload {statistics.PayloadCandidates:N0}, " +

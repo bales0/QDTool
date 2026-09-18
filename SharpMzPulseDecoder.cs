@@ -261,7 +261,7 @@ namespace QDTool
 
             long scaled = durationUnits * 8;
             long difference = Math.Abs(scaled - shortX8);
-            long tolerance = Math.Max(shortX8 / 4, 8);
+            long tolerance = Math.Max(shortX8 / 4, 4);
             if (difference > tolerance)
             {
                 return false;
@@ -282,7 +282,7 @@ namespace QDTool
                 return;
             }
 
-            long tolerance = Math.Max(shortX8 / 4, 8);
+            long tolerance = Math.Max(shortX8 / 4, 4);
             long lowScaled = Math.Max(0, shortX8 - tolerance);
             long highScaled = shortX8 + tolerance;
             markPulses = (int)((lowScaled + 7) >> 3);
