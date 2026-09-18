@@ -118,7 +118,12 @@ namespace QDTool
         Tc1_3,
         Ultra,
         UltraMz800,
-        UltraMz700
+        UltraMz700,
+
+        // Added at the end intentionally, so the numeric values of all
+        // pre-existing profiles remain stable for existing code/tests.
+        Ic1_1,
+        Tc1_1
     }
 
     internal enum MetadataOrigin
@@ -291,9 +296,11 @@ namespace QDTool
             TapeProfile.Normal1_4 => "NORMAL 1:4",
             TapeProfile.Mz700_1_1 => "MZ700 1:1",
             TapeProfile.Mz700_1_3 => "MZ700 1:3",
+            TapeProfile.Ic1_1 => "IC 1:1",
             TapeProfile.Ic1_2 => "IC 1:2",
             TapeProfile.Ic1_3 => "IC 1:3",
             TapeProfile.Ic1_4 => "IC 1:4",
+            TapeProfile.Tc1_1 => "TC 1:1",
             TapeProfile.Tc1_2 => "TC 1:2",
             TapeProfile.Tc1_3 => "TC 1:3",
             TapeProfile.Ultra => "UL",
@@ -312,8 +319,8 @@ namespace QDTool
 
         private static readonly string[] NormalSpeeds = ["1:1", "1:2", "1:3", "1:4"];
         private static readonly string[] Mz700Speeds = ["1:1", "1:3"];
-        private static readonly string[] IcSpeeds = ["1:2", "1:3", "1:4"];
-        private static readonly string[] TcSpeeds = ["1:2", "1:3"];
+        private static readonly string[] IcSpeeds = ["1:1", "1:2", "1:3", "1:4"];
+        private static readonly string[] TcSpeeds = ["1:1", "1:2", "1:3"];
         private static readonly string[] NoSpeed = [""];
 
         public static IReadOnlyList<string> LoaderTypes => AllLoaders;
@@ -344,9 +351,11 @@ namespace QDTool
             TapeProfile.Normal1_4 => ("NORMAL", "1:4"),
             TapeProfile.Mz700_1_1 => ("MZ700", "1:1"),
             TapeProfile.Mz700_1_3 => ("MZ700", "1:3"),
+            TapeProfile.Ic1_1 => ("IC", "1:1"),
             TapeProfile.Ic1_2 => ("IC", "1:2"),
             TapeProfile.Ic1_3 => ("IC", "1:3"),
             TapeProfile.Ic1_4 => ("IC", "1:4"),
+            TapeProfile.Tc1_1 => ("TC", "1:1"),
             TapeProfile.Tc1_2 => ("TC", "1:2"),
             TapeProfile.Tc1_3 => ("TC", "1:3"),
             TapeProfile.Ultra => ("UL", ""),
@@ -366,9 +375,11 @@ namespace QDTool
                 ("NORMAL", "1:4") => TapeProfile.Normal1_4,
                 ("MZ700", "1:1") => TapeProfile.Mz700_1_1,
                 ("MZ700", "1:3") => TapeProfile.Mz700_1_3,
+                ("IC", "1:1") => TapeProfile.Ic1_1,
                 ("IC", "1:2") => TapeProfile.Ic1_2,
                 ("IC", "1:3") => TapeProfile.Ic1_3,
                 ("IC", "1:4") => TapeProfile.Ic1_4,
+                ("TC", "1:1") => TapeProfile.Tc1_1,
                 ("TC", "1:2") => TapeProfile.Tc1_2,
                 ("TC", "1:3") => TapeProfile.Tc1_3,
                 ("UL", "") => TapeProfile.Ultra,
@@ -636,9 +647,11 @@ namespace QDTool
                 ("NORMAL", "1:4") => TapeProfile.Normal1_4,
                 ("MZ700", "1:1") => TapeProfile.Mz700_1_1,
                 ("MZ700", "1:3") => TapeProfile.Mz700_1_3,
+                ("IC", "1:1") => TapeProfile.Ic1_1,
                 ("IC", "1:2") => TapeProfile.Ic1_2,
                 ("IC", "1:3") => TapeProfile.Ic1_3,
                 ("IC", "1:4") => TapeProfile.Ic1_4,
+                ("TC", "1:1") => TapeProfile.Tc1_1,
                 ("TC", "1:2") => TapeProfile.Tc1_2,
                 ("TC", "1:3") => TapeProfile.Tc1_3,
                 ("UL", null or "") => TapeProfile.Ultra,
@@ -678,9 +691,11 @@ namespace QDTool
             TapeProfile.Normal1_4 => "TYPE=NORMAL\nSPEED=1:4\n",
             TapeProfile.Mz700_1_1 => "TYPE=MZ700\nSPEED=1:1\n",
             TapeProfile.Mz700_1_3 => "TYPE=MZ700\nSPEED=1:3\n",
+            TapeProfile.Ic1_1 => "TYPE=IC\nSPEED=1:1\n",
             TapeProfile.Ic1_2 => "TYPE=IC\nSPEED=1:2\n",
             TapeProfile.Ic1_3 => "TYPE=IC\nSPEED=1:3\n",
             TapeProfile.Ic1_4 => "TYPE=IC\nSPEED=1:4\n",
+            TapeProfile.Tc1_1 => "TYPE=TC\nSPEED=1:1\n",
             TapeProfile.Tc1_2 => "TYPE=TC\nSPEED=1:2\n",
             TapeProfile.Tc1_3 => "TYPE=TC\nSPEED=1:3\n",
             TapeProfile.Ultra => "TYPE=UL\n",

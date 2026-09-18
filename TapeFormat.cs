@@ -49,19 +49,29 @@ namespace QDTool
         private static readonly SharpPulseProfile Mz800Normal =
             new(RomTicks(844), RomTicks(906), RomTicks(1664), RomTicks(1726), SharpPulseTimingSource.Mz800Rom1Z013B);
 
-        // Intercopy V10.2 writer rows. Labels 1:3 and 1:4 historically mean
-        // the actual 7:3 (2800 Bd) and 8:3 (3200 Bd) ratios.
+        // Intercopy V10.2 writer rows, derived from speed table $16F7 and
+        // physical writer $1D8E. Historical labels 1:3 and 1:4 correspond to
+        // the 2800 Bd (7:3) and 3200 Bd (8:3) rows.
+        private static readonly SharpPulseProfile Intercopy1200 = new(234.573, 263.894, 469.145, 494.802);
         private static readonly SharpPulseProfile Intercopy2400 = new(113.621, 139.278, 234.573, 260.229);
         private static readonly SharpPulseProfile Intercopy2800 = new(87.965, 124.617, 175.930, 223.577);
         private static readonly SharpPulseProfile Intercopy3200 = new(76.969, 117.286, 157.604, 179.595);
         private static readonly SharpPulseProfile Mz700Normal = new(240, 264, 464, 494);
         private static readonly SharpPulseProfile Mz700Fast3 = new(80, 80, 160, 160);
 
-        // TurboCopy V1.22, 8253 MODE 3 at nominal CKMS 1.10 MHz.
-        // TC 2x: SHORT_COUNT=311 -> 156/155 ticks, LONG_COUNT=622 -> 311/311.
+        // TurboCopy V1.22 writer: 8253 counter 0, MODE 3, nominal CKMS 1.10 MHz.
+        // Source formula: SHORT_COUNT=floor(480*numerator/denominator)+71,
+        // LONG_COUNT=2*SHORT_COUNT. The values below model the raw MODE3 halves.
+        // TC 1x: ratio 1/1 -> SHORT_COUNT=551 -> 276/275 ticks,
+        //        LONG_COUNT=1102 -> 551/551 ticks.
+        private static readonly SharpPulseProfile Tc1 =
+            new(TcTicks(276), TcTicks(275), TcTicks(551), TcTicks(551));
+        // TC 2x: ratio 1/2 -> SHORT_COUNT=311 -> 156/155 ticks,
+        //        LONG_COUNT=622 -> 311/311 ticks.
         private static readonly SharpPulseProfile Tc2 =
             new(TcTicks(156), TcTicks(155), TcTicks(311), TcTicks(311));
-        // TC 3x: SHORT_COUNT=231 -> 116/115 ticks, LONG_COUNT=462 -> 231/231.
+        // TC 3x: ratio 1/3 -> SHORT_COUNT=231 -> 116/115 ticks,
+        //        LONG_COUNT=462 -> 231/231 ticks.
         private static readonly SharpPulseProfile Tc3 =
             new(TcTicks(116), TcTicks(115), TcTicks(231), TcTicks(231));
 
@@ -141,9 +151,11 @@ namespace QDTool
                 TapeProfile.Normal1_4 => BuildConventional(header, body, Intercopy3200),
                 TapeProfile.Mz700_1_1 => BuildConventional(header, body, Mz700Normal),
                 TapeProfile.Mz700_1_3 => BuildMz700Fast3(header, body),
+                TapeProfile.Ic1_1 => BuildIc(header, body, Intercopy1200, 0x4D),
                 TapeProfile.Ic1_2 => BuildIc(header, body, Intercopy2400, 0x20),
                 TapeProfile.Ic1_3 => BuildIc(header, body, Intercopy2800, 0x16),
                 TapeProfile.Ic1_4 => BuildIc(header, body, Intercopy3200, 0x11),
+                TapeProfile.Tc1_1 => BuildTc(header, body, Tc1, 0x52),
                 TapeProfile.Tc1_2 => BuildTc(header, body, Tc2, 0x29),
                 TapeProfile.Tc1_3 => BuildTc(header, body, Tc3, 0x1B),
                 TapeProfile.Ultra or TapeProfile.UltraMz800 or TapeProfile.UltraMz700 =>
@@ -1050,8 +1062,8 @@ namespace QDTool
                     if (decoderEvent.Type == SharpMzDecoderEventType.BlockInvalid)
                     {
                         if (pendingStage == PendingStage.TurboCopyLoader ||
-                            profile is TapeProfile.Ic1_2 or TapeProfile.Ic1_3 or TapeProfile.Ic1_4 or
-                                TapeProfile.Tc1_2 or TapeProfile.Tc1_3 ||
+                            profile is TapeProfile.Ic1_1 or TapeProfile.Ic1_2 or TapeProfile.Ic1_3 or TapeProfile.Ic1_4 or
+                                TapeProfile.Tc1_1 or TapeProfile.Tc1_2 or TapeProfile.Tc1_3 ||
                             decoderEvent.CopyIndex != 0)
                         {
                             throw ChecksumException(decoderEvent);
@@ -1132,6 +1144,7 @@ namespace QDTool
             }
             profile = encoded[25] switch
             {
+                0x4D => TapeProfile.Ic1_1,
                 0x20 => TapeProfile.Ic1_2,
                 0x16 => TapeProfile.Ic1_3,
                 0x11 => TapeProfile.Ic1_4,
@@ -1158,6 +1171,7 @@ namespace QDTool
             }
             profile = loader[0x4B] switch
             {
+                0x52 => TapeProfile.Tc1_1,
                 0x29 => TapeProfile.Tc1_2,
                 0x1B => TapeProfile.Tc1_3,
                 _ => throw new InvalidDataException($"Unsupported TurboCopy speed marker ${loader[0x4B]:X2}.")
