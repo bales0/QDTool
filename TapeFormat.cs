@@ -107,6 +107,10 @@ namespace QDTool
             0x00, 0x00
         ];
 
+        internal static bool IsTurboCopyLoader(ReadOnlySpan<byte> loader) =>
+            loader.Length == TcLoaderTemplate.Length &&
+            loader[..0x4B].SequenceEqual(TcLoaderTemplate.AsSpan(0, 0x4B));
+
         private static readonly byte[] TcTag = [0x5B, 0x96, 0xA5, 0x9D, 0x9A, 0xB7, 0x5D, 0x00];
 
         // Exact 1Z-009A QADCN table from MZ-SD2CMT2-Reborn.
@@ -1159,17 +1163,28 @@ namespace QDTool
             return true;
         }
 
-        private static bool IsTurboCopyHeader(byte[] header) =>
-            header.AsSpan(24, TurboCopyTag.Length).SequenceEqual(TurboCopyTag);
+        internal static bool IsTurboCopyHeader(byte[] header) =>
+            header.Length >= TapeRecord.HeaderLength &&
+            header[0] is 0x01 or 0x76 &&
+            BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(18, 2)) == 90 &&
+            BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(20, 2)) == 0xD400 &&
+            BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(22, 2)) == 0xD400 &&
+            // The first seven bytes are the stable TurboCopy signature. Older
+            // TC/Intercopy headers may keep a workspace value in the eighth byte.
+            header.AsSpan(24, TurboCopyTag.Length - 1)
+                .SequenceEqual(TurboCopyTag[..^1]);
 
-        private static byte[] RecoverTurboCopyHeader(
+        internal static byte[] RecoverTurboCopyHeader(
             byte[] encodedHeader,
             byte[] loader,
             out TapeProfile profile)
         {
-            if (loader.Length != 90)
+            // The checksummed loader block reaches this method only after the
+            // decoder reports BlockValid. Its static template is the final proof
+            // that the seven-byte header signature identifies TurboCopy.
+            if (!SharpTapeProfileEncoder.IsTurboCopyLoader(loader))
             {
-                throw new InvalidDataException("Invalid TurboCopy loader length.");
+                throw new InvalidDataException("Invalid TurboCopy loader template.");
             }
             profile = loader[0x4B] switch
             {
