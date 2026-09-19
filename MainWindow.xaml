@@ -5,7 +5,7 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:QDTool"
         mc:Ignorable="d"
-        Title="MainWindow" Height="450" Width="800"
+        Title="MainWindow" Height="450" Width="800" Icon="/images/QDTool.ico"
         AllowDrop="True" DragEnter="Window_DragEnter" Drop="Window_Drop">
     <Grid>
         <Grid.ColumnDefinitions>
@@ -15,6 +15,11 @@
         <DataGrid x:Name="MzfDataGrid" 
                   IsReadOnly="False"
                   AllowDrop="True"
+                  PreviewMouseLeftButtonDown="MzfDataGrid_PreviewMouseLeftButtonDown"
+                  PreviewMouseMove="MzfDataGrid_PreviewMouseMove"
+                  DragOver="MzfDataGrid_DragOver"
+                  DragLeave="MzfDataGrid_DragLeave"
+                  Drop="MzfDataGrid_Drop"
                   SelectionMode="Extended"
                   SelectionUnit="FullRow"
                   SelectionChanged="MzfDataGrid_SelectionChanged" 
@@ -24,6 +29,16 @@
                   AutoGenerateColumns="False" 
                   CanUserSortColumns="False" 
                   Margin="10,10,91,80">
+            <DataGrid.RowStyle>
+                <Style TargetType="DataGridRow">
+                    <Style.Triggers>
+                        <Trigger Property="IsSelected" Value="True">
+                            <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
+                            <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+                        </Trigger>
+                    </Style.Triggers>
+                </Style>
+            </DataGrid.RowStyle>
             <DataGrid.Columns>
                 <DataGridTextColumn Header="Type" Binding="{Binding MzfFtypeName}" Width="Auto" IsReadOnly="True"/>
                 <DataGridTextColumn Header="File name" Binding="{Binding MzfFname}" Width="Auto" MinWidth="140" IsReadOnly="True"/>

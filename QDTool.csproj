@@ -6,13 +6,14 @@
     <Nullable>enable</Nullable>
     <UseWPF>true</UseWPF>
     <ApplicationIcon>images\QDTool.ico</ApplicationIcon>
-    <Version>0.2.0-alpha</Version>
-    <FileVersion>0.2.0.0</FileVersion>
-    <AssemblyVersion>0.2.0.0</AssemblyVersion>
+    <Version>0.9.0-beta</Version>
+    <FileVersion>0.9.0</FileVersion>
+    <AssemblyVersion>0.9.0</AssemblyVersion>
   </PropertyGroup>
 
   <ItemGroup>
     <Compile Remove="QDTool.Tests\**\*.cs" />
+    <Resource Include="images\QDTool.ico" />
   </ItemGroup>
 
   <ItemGroup>

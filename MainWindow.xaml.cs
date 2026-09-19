@@ -92,6 +92,44 @@ public class MzfDisplayData : INotifyPropertyChanged
 
 namespace QDTool
 {
+    internal static class ListReorder
+    {
+        internal static bool MoveItems<T>(IList<T> items, IEnumerable<int> sourceIndices, int insertionIndex)
+        {
+            int[] indices = sourceIndices
+                .Where(index => index >= 0 && index < items.Count)
+                .Distinct()
+                .OrderBy(index => index)
+                .ToArray();
+            if (indices.Length == 0)
+            {
+                return false;
+            }
+
+            insertionIndex = Math.Clamp(insertionIndex, 0, items.Count);
+            List<T> movedItems = indices.Select(index => items[index]).ToList();
+            List<T> reordered = items.ToList();
+            for (int index = indices.Length - 1; index >= 0; index--)
+            {
+                reordered.RemoveAt(indices[index]);
+            }
+
+            int adjustedInsertionIndex = insertionIndex - indices.Count(index => index < insertionIndex);
+            reordered.InsertRange(adjustedInsertionIndex, movedItems);
+            if (items.SequenceEqual(reordered))
+            {
+                return false;
+            }
+
+            items.Clear();
+            foreach (T item in reordered)
+            {
+                items.Add(item);
+            }
+            return true;
+        }
+    }
+
     internal static class FeatureModePolicy
     {
         public static string GetOpenFilter(bool advanced) => advanced
@@ -112,6 +150,8 @@ namespace QDTool
     /// </summary>
     public partial class MainWindow : Window
     {
+        private const string RowDragDataFormat = "QDTool.TapeRecords";
+
         private static readonly HashSet<string> ReservedWindowsFileNames = new(StringComparer.OrdinalIgnoreCase)
         {
             "CON", "PRN", "AUX", "NUL",
@@ -123,6 +163,10 @@ namespace QDTool
         private List<TapeRecord> mzfBlocks => document.Records;
         private string actFileName = string.Empty;
         private bool updatingProfileEditors;
+        private Point rowDragStartPoint;
+        private MzfDisplayData? rowDragStartItem;
+        private bool rowDragInProgress;
+        private DataGridRow? rowDropTarget;
         private bool AdvancedFeaturesEnabled => advancedFeaturesCheckBox.IsChecked == true;
 
         public ObservableCollection<MzfDisplayData> MzfDisplayDataCollection { get; set; }
@@ -342,6 +386,8 @@ namespace QDTool
         {
             if (e.Data.GetDataPresent(DataFormats.FileDrop))
                 e.Effects = DragDropEffects.Copy; // Změňte ukazatel, aby uživatel věděl, že soubor může být zde upuštěn
+            else if (e.Data.GetDataPresent(RowDragDataFormat))
+                e.Effects = DragDropEffects.Move;
             else
                 e.Effects = DragDropEffects.None; // Jinak neumožněte drop
         }
@@ -1019,9 +1065,264 @@ namespace QDTool
             exportButton.IsEnabled = MzfDataGrid.SelectedItem != null;
             deleteButton.IsEnabled = MzfDataGrid.SelectedItem != null;
 
-            int selectedIndex = MzfDataGrid.SelectedIndex;
-            moveUpButton.IsEnabled = selectedIndex > 0 && mzfBlocks.Count > 1;
-            moveDownButton.IsEnabled = selectedIndex < mzfBlocks.Count - 1 && selectedIndex >= 0;
+            int[] selectedIndices = GetSelectedGridIndices();
+            moveUpButton.IsEnabled = selectedIndices.Length > 0 && selectedIndices[0] > 0;
+            moveDownButton.IsEnabled = selectedIndices.Length > 0 && selectedIndices[^1] < mzfBlocks.Count - 1;
+        }
+
+        private void MzfDataGrid_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            rowDragStartPoint = e.GetPosition(MzfDataGrid);
+            DependencyObject? source = e.OriginalSource as DependencyObject;
+            DataGridRow? row = FindVisualParent<DataGridRow>(source);
+            bool editorClicked = FindVisualParent<ComboBox>(source) is not null;
+            if (editorClicked && row is not null && !row.IsSelected &&
+                (Keyboard.Modifiers & ModifierKeys.Shift) == 0)
+            {
+                if ((Keyboard.Modifiers & ModifierKeys.Control) == 0)
+                {
+                    MzfDataGrid.SelectedItems.Clear();
+                }
+                row.IsSelected = true;
+            }
+            rowDragStartItem = editorClicked ? null : row?.Item as MzfDisplayData;
+        }
+
+        private void MzfDataGrid_PreviewMouseMove(object sender, MouseEventArgs e)
+        {
+            if (e.LeftButton != MouseButtonState.Pressed || rowDragStartItem is null || rowDragInProgress)
+            {
+                return;
+            }
+
+            Point currentPosition = e.GetPosition(MzfDataGrid);
+            if (Math.Abs(currentPosition.X - rowDragStartPoint.X) < SystemParameters.MinimumHorizontalDragDistance &&
+                Math.Abs(currentPosition.Y - rowDragStartPoint.Y) < SystemParameters.MinimumVerticalDragDistance)
+            {
+                return;
+            }
+
+            List<MzfDisplayData> draggedDisplayItems = MzfDataGrid.SelectedItems
+                .OfType<MzfDisplayData>()
+                .Where(item => MzfDisplayDataCollection.Contains(item))
+                .OrderBy(item => MzfDisplayDataCollection.IndexOf(item))
+                .ToList();
+            if (!draggedDisplayItems.Contains(rowDragStartItem))
+            {
+                draggedDisplayItems.Clear();
+                draggedDisplayItems.Add(rowDragStartItem);
+            }
+
+            List<TapeRecord> draggedRecords = draggedDisplayItems
+                .Select(item => MzfDisplayDataCollection.IndexOf(item))
+                .Where(index => index >= 0 && index < mzfBlocks.Count)
+                .Select(index => mzfBlocks[index])
+                .ToList();
+            if (draggedRecords.Count == 0)
+            {
+                return;
+            }
+
+            var dragData = new DataObject();
+            dragData.SetData(RowDragDataFormat, draggedRecords);
+            rowDragInProgress = true;
+            try
+            {
+                DragDrop.DoDragDrop(MzfDataGrid, dragData, DragDropEffects.Move);
+            }
+            finally
+            {
+                ClearDropTargetIndicator();
+                rowDragInProgress = false;
+                rowDragStartItem = null;
+            }
+        }
+
+        private void MzfDataGrid_DragOver(object sender, DragEventArgs e)
+        {
+            if (!e.Data.GetDataPresent(RowDragDataFormat))
+            {
+                return;
+            }
+
+            e.Effects = DragDropEffects.Move;
+            e.Handled = true;
+            Point position = e.GetPosition(MzfDataGrid);
+            UpdateDropTargetIndicator(position);
+            ScrollDataGridDuringDrag(position);
+        }
+
+        private void MzfDataGrid_DragLeave(object sender, DragEventArgs e)
+        {
+            if (e.Data.GetDataPresent(RowDragDataFormat))
+            {
+                ClearDropTargetIndicator();
+            }
+        }
+
+        private void MzfDataGrid_Drop(object sender, DragEventArgs e)
+        {
+            if (!e.Data.GetDataPresent(RowDragDataFormat) ||
+                e.Data.GetData(RowDragDataFormat) is not List<TapeRecord> draggedRecords)
+            {
+                return;
+            }
+
+            int insertionIndex = GetDropInsertionIndex(e.GetPosition(MzfDataGrid));
+            ClearDropTargetIndicator();
+            int[] sourceIndices = draggedRecords
+                .Select(record => mzfBlocks.IndexOf(record))
+                .Where(index => index >= 0)
+                .Distinct()
+                .OrderBy(index => index)
+                .ToArray();
+
+            bool changed = ListReorder.MoveItems(mzfBlocks, sourceIndices, insertionIndex);
+            if (changed)
+            {
+                document.IsModified = true;
+                RefreshGrid();
+            }
+            RestoreGridSelection(draggedRecords);
+
+            e.Effects = changed ? DragDropEffects.Move : DragDropEffects.None;
+            e.Handled = true;
+        }
+
+        private int GetDropInsertionIndex(Point position)
+        {
+            DependencyObject? hit = MzfDataGrid.InputHitTest(position) as DependencyObject;
+            DataGridRow? row = FindVisualParent<DataGridRow>(hit);
+            if (row is null)
+            {
+                return mzfBlocks.Count;
+            }
+
+            Point positionInRow = MzfDataGrid.TranslatePoint(position, row);
+            return row.GetIndex() + (positionInRow.Y >= row.ActualHeight / 2 ? 1 : 0);
+        }
+
+        private void UpdateDropTargetIndicator(Point position)
+        {
+            ClearDropTargetIndicator();
+
+            DependencyObject? hit = MzfDataGrid.InputHitTest(position) as DependencyObject;
+            DataGridRow? row = FindVisualParent<DataGridRow>(hit);
+            bool insertAfter = false;
+            if (row is not null)
+            {
+                Point positionInRow = MzfDataGrid.TranslatePoint(position, row);
+                insertAfter = positionInRow.Y >= row.ActualHeight / 2;
+            }
+            else if (mzfBlocks.Count > 0)
+            {
+                row = MzfDataGrid.ItemContainerGenerator.ContainerFromIndex(mzfBlocks.Count - 1) as DataGridRow;
+                insertAfter = true;
+            }
+
+            if (row is null)
+            {
+                return;
+            }
+
+            rowDropTarget = row;
+            row.BorderBrush = SystemColors.HighlightBrush;
+            row.BorderThickness = insertAfter
+                ? new Thickness(0, 0, 0, 3)
+                : new Thickness(0, 3, 0, 0);
+        }
+
+        private void ClearDropTargetIndicator()
+        {
+            if (rowDropTarget is null)
+            {
+                return;
+            }
+
+            rowDropTarget.ClearValue(Control.BorderBrushProperty);
+            rowDropTarget.ClearValue(Control.BorderThicknessProperty);
+            rowDropTarget = null;
+        }
+
+        private int[] GetSelectedGridIndices() => MzfDataGrid.SelectedItems
+            .OfType<MzfDisplayData>()
+            .Select(item => MzfDisplayDataCollection.IndexOf(item))
+            .Where(index => index >= 0 && index < mzfBlocks.Count)
+            .Distinct()
+            .OrderBy(index => index)
+            .ToArray();
+
+        private void RestoreGridSelection(IEnumerable<TapeRecord> records)
+        {
+            int[] indices = records
+                .Select(record => mzfBlocks.IndexOf(record))
+                .Where(index => index >= 0)
+                .Distinct()
+                .OrderBy(index => index)
+                .ToArray();
+            if (indices.Length == 0)
+            {
+                return;
+            }
+
+            MzfDataGrid.SelectedItems.Clear();
+            foreach (int index in indices)
+            {
+                MzfDataGrid.SelectedItems.Add(MzfDisplayDataCollection[index]);
+            }
+            MzfDataGrid.ScrollIntoView(MzfDisplayDataCollection[indices[0]]);
+            MzfDataGrid.Focus();
+        }
+
+        private void ScrollDataGridDuringDrag(Point position)
+        {
+            ScrollViewer? scrollViewer = FindVisualChild<ScrollViewer>(MzfDataGrid);
+            if (scrollViewer is null)
+            {
+                return;
+            }
+
+            const double edgeSize = 24;
+            if (position.Y < edgeSize)
+            {
+                scrollViewer.LineUp();
+            }
+            else if (position.Y > MzfDataGrid.ActualHeight - edgeSize)
+            {
+                scrollViewer.LineDown();
+            }
+        }
+
+        private static T? FindVisualParent<T>(DependencyObject? element) where T : DependencyObject
+        {
+            while (element is not null)
+            {
+                if (element is T match)
+                {
+                    return match;
+                }
+                element = VisualTreeHelper.GetParent(element);
+            }
+            return null;
+        }
+
+        private static T? FindVisualChild<T>(DependencyObject parent) where T : DependencyObject
+        {
+            for (int index = 0; index < VisualTreeHelper.GetChildrenCount(parent); index++)
+            {
+                DependencyObject child = VisualTreeHelper.GetChild(parent, index);
+                if (child is T match)
+                {
+                    return match;
+                }
+
+                T? descendant = FindVisualChild<T>(child);
+                if (descendant is not null)
+                {
+                    return descendant;
+                }
+            }
+            return null;
         }
 
         private void LoaderComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -1104,45 +1405,31 @@ namespace QDTool
 
         private void button_Click_Up(object sender, RoutedEventArgs e)
         {
-            int selectedIndex = MzfDataGrid.SelectedIndex;
-            if (selectedIndex > 0)
+            int[] selectedIndices = GetSelectedGridIndices();
+            if (selectedIndices.Length > 0 && selectedIndices[0] > 0)
             {
-                var itemToMoveUp = mzfBlocks[selectedIndex];
-                mzfBlocks.RemoveAt(selectedIndex);
-                mzfBlocks.Insert(selectedIndex - 1, itemToMoveUp);
-                document.IsModified = true;
-
-                //MzfDataGrid.ItemsSource = null;
-                //MzfDataGrid.ItemsSource = mzfBlocks;
-
-                RefreshGrid();
-
-                MzfDataGrid.SelectedIndex = selectedIndex - 1;
-                MzfDataGrid.Focus();
+                List<TapeRecord> selectedRecords = selectedIndices.Select(index => mzfBlocks[index]).ToList();
+                if (ListReorder.MoveItems(mzfBlocks, selectedIndices, selectedIndices[0] - 1))
+                {
+                    document.IsModified = true;
+                    RefreshGrid();
+                    RestoreGridSelection(selectedRecords);
+                }
             }
         }
 
         private void button_Click_Down(object sender, RoutedEventArgs e)
         {
-            int selectedIndex = MzfDataGrid.SelectedIndex;
-            if (selectedIndex < mzfBlocks.Count - 1 && selectedIndex >= 0)
+            int[] selectedIndices = GetSelectedGridIndices();
+            if (selectedIndices.Length > 0 && selectedIndices[^1] < mzfBlocks.Count - 1)
             {
-                var itemToMoveDown = mzfBlocks[selectedIndex];
-                mzfBlocks.RemoveAt(selectedIndex);
-                mzfBlocks.Insert(selectedIndex + 1, itemToMoveDown);
-                document.IsModified = true;
-
-                //MzfDataGrid.ItemsSource = null;
-                //MzfDataGrid.ItemsSource = mzfBlocks;
-
-                RefreshGrid();
-
-                //var currentSource = MzfDataGrid.ItemsSource;
-                //MzfDataGrid.ItemsSource = null;
-                //MzfDataGrid.ItemsSource = currentSource;
-
-                MzfDataGrid.SelectedIndex = selectedIndex + 1;
-                MzfDataGrid.Focus();
+                List<TapeRecord> selectedRecords = selectedIndices.Select(index => mzfBlocks[index]).ToList();
+                if (ListReorder.MoveItems(mzfBlocks, selectedIndices, selectedIndices[^1] + 2))
+                {
+                    document.IsModified = true;
+                    RefreshGrid();
+                    RestoreGridSelection(selectedRecords);
+                }
             }
         }
 
@@ -1509,6 +1796,7 @@ namespace QDTool
             {
                 Owner = this,
                 Title = "New",
+                Icon = this.Icon,
                 Width = 320,
                 Height = 165,
                 ResizeMode = ResizeMode.NoResize,
@@ -1577,6 +1865,7 @@ namespace QDTool
             {
                 Owner = this,
                 Title = "About",
+                Icon = this.Icon,
                 Width = 300,
                 Height = 175,
                 ResizeMode = ResizeMode.NoResize,

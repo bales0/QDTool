@@ -5,7 +5,8 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:QDTool"
         mc:Ignorable="d"
-        Title="Hex Browser" Height="450" Width="800" MinHeight="300" MinWidth="600">
+        Title="Hex Browser" Height="450" Width="800" MinHeight="300" MinWidth="600"
+        Icon="/images/QDTool.ico">
     <ScrollViewer HorizontalScrollBarVisibility="Auto"
                   VerticalScrollBarVisibility="Auto"
                   Padding="10">
