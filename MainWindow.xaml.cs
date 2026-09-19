@@ -905,19 +905,7 @@ namespace QDTool
                     }
                     else if (outputFormat == TapeDocumentFormat.Qdf)
                     {
-                        using (var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write))
-                        {
-                            QDFFileReader qdfr = new QDFFileReader();
-                            qdfr.WriteQDFHeaderToFile(fileStream, checked((byte)(mzfBlocks.Count * 2)), allowImportedNonStandard);
-                            foreach (TapeRecord record in mzfBlocks)
-                            {
-                                qdfr.WriteQDFFileHeaderToFile(fileStream, record.Header);
-                                qdfr.WriteQDFFileBodyToFile(fileStream, record.Body);
-                            }
-                            long currentSize = fileStream.Length;
-                            long bytesToWrite = QDFFileReader.ImageSize - currentSize;
-                            qdfr.WriteBytesToStream(fileStream, 0x00, bytesToWrite);
-                        }
+                        File.WriteAllBytes(filePath, QDFFileReader.BuildImage(mzfBlocks, allowImportedNonStandard));
                         DiscardMetadataNotStoredByCurrentFormat();
                         SetCurrentDocumentAfterSave(filePath, TapeDocumentFormat.Qdf, sidecarPath: null);
                     }

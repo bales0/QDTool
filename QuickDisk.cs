@@ -950,6 +950,34 @@ namespace QDTool
         public const long HeaderSize = 7655;
         public const long FileOverhead = 620;
 
+            public static byte[] BuildImage(
+                IReadOnlyList<TapeRecord> records,
+                bool allowImportedNonStandard = false)
+            {
+                if (!QuickDiskLimits.TryValidateForSave(records.Count, allowImportedNonStandard, out string countError))
+                {
+                    throw new InvalidDataException(countError);
+                }
+
+                long requiredSize = HeaderSize + records.Sum(record => FileOverhead + record.Body.DataSize);
+                if (requiredSize > ImageSize)
+                {
+                    throw new InvalidDataException(
+                        $"Cannot save: QDF capacity exceeded ({requiredSize} bytes required, {ImageSize} available).");
+                }
+
+                using var stream = new MemoryStream(checked((int)ImageSize));
+                var writer = new QDFFileReader();
+                writer.WriteQDFHeaderToFile(stream, checked((byte)(records.Count * 2)), allowImportedNonStandard);
+                foreach (TapeRecord record in records)
+                {
+                    writer.WriteQDFFileHeaderToFile(stream, record.Header);
+                    writer.WriteQDFFileBodyToFile(stream, record.Body);
+                }
+                writer.WriteBytesToStream(stream, 0x00, ImageSize - stream.Length);
+                return stream.ToArray();
+            }
+
             public long currentPosition = 0;
             public long totalLength = 0;
             public long bytesRemaining = 0;
@@ -1198,7 +1226,7 @@ namespace QDTool
                 return mzfBlocks;
             }
 
-            public void WriteBytesToStream(FileStream fileStream, byte val, long repeat)
+            public void WriteBytesToStream(Stream fileStream, byte val, long repeat)
             {
                 for (long i = 0; i < repeat; i++)
                 {
@@ -1206,7 +1234,7 @@ namespace QDTool
                 }
             }
 
-            public void WriteQDFHeaderToFile(FileStream fileStream, byte fbCount, bool allowImportedNonStandard = false)
+            public void WriteQDFHeaderToFile(Stream fileStream, byte fbCount, bool allowImportedNonStandard = false)
             {
                 if ((fbCount & 1) != 0)
                 {
@@ -1231,7 +1259,7 @@ namespace QDTool
                 //fileStream.Write(header.Crc, 0, header.Crc.Length);
             }
 
-            public void WriteQDFFileHeaderToFile(FileStream fileStream, MZQFileHeader mzfHeader)
+            public void WriteQDFFileHeaderToFile(Stream fileStream, MZQFileHeader mzfHeader)
             {
                 WriteBytesToStream(fileStream, 0x16, 10);
                 fileStream.Write(SharpQdFrameCodec.EncodeHeaderFrame(mzfHeader));
@@ -1240,7 +1268,7 @@ namespace QDTool
                 WriteBytesToStream(fileStream, 0x00, 254);
             }
 
-            public void WriteQDFFileBodyToFile(FileStream fileStream, MZQFileBody mzfBody)
+            public void WriteQDFFileBodyToFile(Stream fileStream, MZQFileBody mzfBody)
             {
                 WriteBytesToStream(fileStream, 0x16, 10);
                 fileStream.Write(SharpQdFrameCodec.EncodeBodyFrame(mzfBody));
@@ -1574,6 +1602,9 @@ namespace QDTool
 
         internal static class QuickDiskPhysicalWriter
         {
+            internal const int FlashFloppyCanonicalFileDataOffset = 0x3A90;
+            internal const int QdfSignatureLength = 16;
+
             public static byte[] Write(
                 IReadOnlyList<TapeRecord> records,
                 QdImageFormat format,
@@ -1589,16 +1620,30 @@ namespace QDTool
                 {
                     throw new ArgumentException("The preserved physical profile does not match the requested QD container type.", nameof(sourceProfile));
                 }
-                byte[] byteStream = SharpQdFrameCodec.BuildPhysicalByteStream(records);
-                byte[] encoded = QuickDiskMfmCodec.Encode(byteStream);
-                int capacity = profile.WindowEnd - profile.WindowStart;
-                if (encoded.Length > capacity)
+                byte[] encoded;
+                int trackDataStart;
+                if (format == QdImageFormat.FlashFloppyPhysical)
                 {
-                    throw new InvalidDataException("Cannot save: QuickDisk physical data window capacity exceeded.");
+                    byte[] qdf = QDFFileReader.BuildImage(records, allowImportedNonStandard);
+                    encoded = QuickDiskMfmCodec.Encode(qdf.AsSpan(QdfSignatureLength));
+                    trackDataStart = FlashFloppyCanonicalFileDataOffset - profile.DataOffset;
+                }
+                else
+                {
+                    byte[] byteStream = SharpQdFrameCodec.BuildPhysicalByteStream(records);
+                    encoded = QuickDiskMfmCodec.Encode(byteStream);
+                    trackDataStart = profile.WindowStart;
+                }
+
+                if (trackDataStart < profile.WindowStart ||
+                    (long)trackDataStart + encoded.Length > profile.WindowEnd ||
+                    (long)trackDataStart + encoded.Length > profile.StoredTrackLength)
+                {
+                    throw new InvalidDataException("Cannot save: QuickDisk physical data placement exceeds the track data window.");
                 }
 
                 byte[] track = Enumerable.Repeat(profile.BlankFiller, profile.StoredTrackLength).ToArray();
-                encoded.CopyTo(track, profile.WindowStart);
+                encoded.CopyTo(track, trackDataStart);
                 return HxcFlashFloppyQdContainer.Write(track, profile);
             }
 
@@ -1609,6 +1654,36 @@ namespace QDTool
                 QuickDiskPhysicalProfile? sourceProfile = null)
             {
                 QuickDiskPhysicalProfile profile = sourceProfile ?? QuickDiskPhysicalProfile.For(format);
+                if (profile.Format != format)
+                {
+                    error = "The preserved physical profile does not match the requested QD container type.";
+                    return false;
+                }
+
+                if (format == QdImageFormat.FlashFloppyPhysical)
+                {
+                    long requiredSize = QDFFileReader.HeaderSize +
+                        records.Sum(record => QDFFileReader.FileOverhead + record.Body.DataSize);
+                    if (requiredSize > QDFFileReader.ImageSize)
+                    {
+                        error = $"Cannot save: QDF-compatible QuickDisk capacity exceeded ({requiredSize} bytes required, {QDFFileReader.ImageSize} available).";
+                        return false;
+                    }
+
+                    long trackDataStart = FlashFloppyCanonicalFileDataOffset - profile.DataOffset;
+                    long canonicalEncodedBytes = (QDFFileReader.ImageSize - QdfSignatureLength) * 2;
+                    if (trackDataStart < profile.WindowStart ||
+                        trackDataStart + canonicalEncodedBytes > profile.WindowEnd ||
+                        trackDataStart + canonicalEncodedBytes > profile.StoredTrackLength)
+                    {
+                        error = "Cannot save: the FlashFloppy profile cannot contain the canonical QDF/qdf2qd payload.";
+                        return false;
+                    }
+
+                    error = string.Empty;
+                    return true;
+                }
+
                 long logicalBytes = 1 + 10 + 4 + 7 + 256;
                 foreach (TapeRecord record in records)
                 {
